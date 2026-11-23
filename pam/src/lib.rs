@@ -34,7 +34,7 @@
 //!     // call this once, early.
 //!     let mut pam = PamAuth::new(None).expect("failed to initialized PAM");
 //!
-//!     let mut rt = tokio::runtime::Runtime::new().expect("failed to initialize tokio runtime");
+//!     let rt = tokio::runtime::Runtime::new().expect("failed to initialize tokio runtime");
 //!     rt.block_on(async move {
 //!         let res = pam.auth("other", "user", "pass", None).await;
 //!         println!("pam auth result: {:?}", res);
@@ -43,12 +43,11 @@
 //! ```
 #[macro_use]
 extern crate log;
-#[macro_use]
-extern crate serde_derive;
 
 mod pam;
 mod pamclient;
 mod pamserver;
+mod wire;
 
 use std::sync::atomic::Ordering;
 
@@ -59,6 +58,5 @@ pub use crate::pamclient::PamAuth;
 #[doc(hidden)]
 pub fn test_mode(enabled: bool) {
     use crate::pam::TEST_MODE;
-    let getal = if enabled { 1 } else { 0 };
-    TEST_MODE.store(getal, Ordering::SeqCst);
+    TEST_MODE.store(usize::from(enabled), Ordering::SeqCst);
 }

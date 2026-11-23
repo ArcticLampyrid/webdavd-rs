@@ -4,9 +4,8 @@ use std::path::Path;
 use std::process::exit;
 use std::{fs, io};
 
+use dav_server::DavMethodSet;
 use serde::{Deserialize, Deserializer};
-use toml;
-use webdav_handler::DavMethodSet;
 
 use crate::router::Router;
 
@@ -16,6 +15,7 @@ pub struct Config {
     #[serde(default)]
     pub accounts: Accounts,
     #[serde(default)]
+    #[cfg_attr(not(feature = "pam"), allow(dead_code))]
     pub pam:      Pam,
     #[serde(default)]
     pub htpasswd: HashMap<String, HtPasswd>,
@@ -59,6 +59,8 @@ pub struct Accounts {
     pub realm:     Option<String>,
 }
 
+// The [pam] section is accepted even if PAM support is not compiled in.
+#[cfg_attr(not(feature = "pam"), allow(dead_code))]
 #[derive(Deserialize, Debug, Clone, Default)]
 pub struct Pam {
     pub service:       String,
@@ -193,7 +195,7 @@ pub fn deserialize_user<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error
 where D: Deserializer<'de> {
     let s = String::deserialize(deserializer)?;
     s.parse::<u32>()
-        .map(|v| Some(v))
+        .map(Some)
         .map_err(serde::de::Error::custom)
 }
 
@@ -202,7 +204,7 @@ pub fn deserialize_group<'de, D>(deserializer: D) -> Result<Option<u32>, D::Erro
 where D: Deserializer<'de> {
     let s = String::deserialize(deserializer)?;
     s.parse::<u32>()
-        .map(|v| Some(v))
+        .map(Some)
         .map_err(serde::de::Error::custom)
 }
 
@@ -210,21 +212,21 @@ pub fn deserialize_methodset<'de, D>(deserializer: D) -> Result<Option<DavMethod
 where D: Deserializer<'de> {
     let m = Vec::<String>::deserialize(deserializer)?;
     DavMethodSet::from_vec(m)
-        .map(|v| Some(v))
+        .map(Some)
         .map_err(serde::de::Error::custom)
 }
 
 pub fn deserialize_authtype<'de, D>(deserializer: D) -> Result<Option<AuthType>, D::Error>
 where D: Deserializer<'de> {
     let s = String::deserialize(deserializer)?;
-    if s.starts_with("htpasswd.") {
-        return Ok(Some(AuthType::HtPasswd(s[9..].to_string())));
+    if let Some(name) = s.strip_prefix("htpasswd.") {
+        return Ok(Some(AuthType::HtPasswd(name.to_string())));
     }
     #[cfg(feature = "pam")]
     if &s == "pam" {
         return Ok(Some(AuthType::Pam));
     }
-    if s == "" {
+    if s.is_empty() {
         return Ok(None);
     }
     Err(serde::de::Error::custom("unknown auth-type"))
@@ -247,7 +249,7 @@ pub fn build_routes(cfg: &str, config: &mut Config) -> io::Result<()> {
     let mut builder = Router::builder();
     for (idx, location) in config.location.iter().enumerate() {
         for r in &location.route {
-            if let Err(e) = builder.add(r, location.methods.clone(), idx) {
+            if let Err(e) = builder.add(r, location.methods, idx) {
                 let msg = format!("{}: [[location]][{}]: route {}: {}", cfg, idx, r, e);
                 return Err(io::Error::new(io::ErrorKind::InvalidData, msg));
             }
@@ -260,7 +262,7 @@ pub fn build_routes(cfg: &str, config: &mut Config) -> io::Result<()> {
 pub fn check(cfg: &str, config: &Config) {
     #[cfg(feature = "pam")]
     if let Some(AuthType::Pam) = config.accounts.auth_type {
-        if config.pam.service == "" {
+        if config.pam.service.is_empty() {
             eprintln!("{}: missing section [pam]", cfg);
             exit(1);
         }

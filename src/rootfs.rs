@@ -3,12 +3,14 @@
 //
 //  Shows "/" and "/user".
 //
-use std;
 use std::path::Path;
 
+use dav_server::davpath::DavPath;
+use dav_server::fs::{
+    DavDirEntry, DavFile, DavFileSystem, DavMetaData, FsError, FsFuture, FsResult, FsStream, OpenOptions,
+    ReadDirMeta,
+};
 use futures::future::{self, FutureExt};
-use webdav_handler::davpath::DavPath;
-use webdav_handler::fs::*;
 
 use crate::userfs::UserFs;
 
@@ -22,7 +24,7 @@ impl RootFs {
     pub fn new<P>(dir: P, user: Option<String>, creds: Option<(u32, u32, &[u32])>) -> Box<RootFs>
     where P: AsRef<Path> + Clone {
         Box::new(RootFs {
-            user: user.unwrap_or("".to_string()),
+            user: user.unwrap_or_default(),
             fs:   *UserFs::new(dir, creds, false, false, true),
         })
     }
@@ -30,7 +32,7 @@ impl RootFs {
 
 impl DavFileSystem for RootFs {
     // Only allow "/" or "/user", for both return the metadata of the UserFs root.
-    fn metadata<'a>(&'a self, path: &'a DavPath) -> FsFuture<Box<dyn DavMetaData>> {
+    fn metadata<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, Box<dyn DavMetaData>> {
         async move {
             let b = path.as_bytes();
             if b != b"/" && &b[1..] != self.user.as_bytes() {
@@ -42,16 +44,21 @@ impl DavFileSystem for RootFs {
         .boxed()
     }
 
+    // No symlinks here, so this is the same as metadata().
+    fn symlink_metadata<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, Box<dyn DavMetaData>> {
+        self.metadata(path)
+    }
+
     // Only return one entry: "user".
     fn read_dir<'a>(
         &'a self,
         path: &'a DavPath,
         _meta: ReadDirMeta,
-    ) -> FsFuture<FsStream<Box<dyn DavDirEntry>>>
+    ) -> FsFuture<'a, FsStream<Box<dyn DavDirEntry>>>
     {
         Box::pin(async move {
             let mut v = Vec::new();
-            if self.user != "" {
+            if !self.user.is_empty() {
                 v.push(RootFsDirEntry {
                     name: self.user.clone(),
                     meta: self.fs.metadata(path).await,
@@ -65,12 +72,12 @@ impl DavFileSystem for RootFs {
     }
 
     // cannot open any files.
-    fn open(&self, _path: &DavPath, _options: OpenOptions) -> FsFuture<Box<dyn DavFile>> {
+    fn open<'a>(&'a self, _path: &'a DavPath, _options: OpenOptions) -> FsFuture<'a, Box<dyn DavFile>> {
         Box::pin(future::ready(Err(FsError::NotImplemented)))
     }
 
     // forward quota.
-    fn get_quota(&self) -> FsFuture<(u64, Option<u64>)> {
+    fn get_quota(&self) -> FsFuture<'_, (u64, Option<u64>)> {
         self.fs.get_quota()
     }
 }
@@ -81,13 +88,12 @@ struct RootFsReadDir {
 }
 
 impl Iterator for RootFsReadDir {
-    type Item = Box<dyn DavDirEntry>;
+    type Item = FsResult<Box<dyn DavDirEntry>>;
 
-    fn next(&mut self) -> Option<Box<dyn DavDirEntry>> {
-        match self.iterator.next() {
-            None => return None,
-            Some(entry) => Some(Box::new(entry)),
-        }
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iterator
+            .next()
+            .map(|entry| Ok(Box::new(entry) as Box<dyn DavDirEntry>))
     }
 }
 
@@ -98,7 +104,7 @@ struct RootFsDirEntry {
 }
 
 impl DavDirEntry for RootFsDirEntry {
-    fn metadata(&self) -> FsFuture<Box<dyn DavMetaData>> {
+    fn metadata(&self) -> FsFuture<'_, Box<dyn DavMetaData>> {
         Box::pin(future::ready(self.meta.clone()))
     }
 
@@ -106,7 +112,7 @@ impl DavDirEntry for RootFsDirEntry {
         self.name.as_bytes().to_vec()
     }
 
-    fn is_dir(&self) -> FsFuture<bool> {
+    fn is_dir(&self) -> FsFuture<'_, bool> {
         Box::pin(future::ready(Ok(true)))
     }
 }

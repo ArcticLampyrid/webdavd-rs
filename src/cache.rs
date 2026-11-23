@@ -60,8 +60,8 @@ impl<K: Hash + Eq + Clone, V> Cache<K, V> {
             }
         }
         for x in n..m.fifo.len() {
-            let &(_, ref key) = m.fifo.get(x).unwrap();
-            m.map.remove(&key);
+            let (_, key) = m.fifo.get(x).unwrap();
+            m.map.remove(key);
         }
         m.fifo.truncate(n);
     }
@@ -77,10 +77,10 @@ impl<K: Hash + Eq + Clone, V> Cache<K, V> {
     }
 
     // see https://doc.rust-lang.org/book/first-edition/borrow-and-asref.html
-    pub fn get<Q: ?Sized>(&self, key: &Q) -> Option<Arc<V>>
+    pub fn get<Q>(&self, key: &Q) -> Option<Arc<V>>
     where
         K: Borrow<Q>,
-        Q: Hash + Eq,
+        Q: Hash + Eq + ?Sized,
     {
         let mut m = self.intern.lock().unwrap();
         self.expire(&mut *m);
@@ -105,15 +105,20 @@ pub(crate) mod cached {
 
     struct Timeouts {
         pwcache:  Duration,
+        #[cfg(feature = "pam")]
         pamcache: Duration,
     }
 
     lazy_static! {
         static ref TIMEOUTS: Mutex<Timeouts> = Mutex::new(Timeouts {
             pwcache:  Duration::new(120, 0),
+            #[cfg(feature = "pam")]
             pamcache: Duration::new(120, 0),
         });
         static ref PWCACHE: cache::Cache<String, unixuser::User> = new_pwcache();
+    }
+    #[cfg(feature = "pam")]
+    lazy_static! {
         static ref PAMCACHE: cache::Cache<u64, String> = new_pamcache();
     }
 
@@ -122,6 +127,7 @@ pub(crate) mod cached {
         cache::Cache::new().maxage(timeouts.pwcache)
     }
 
+    #[cfg(feature = "pam")]
     fn new_pamcache() -> cache::Cache<u64, String> {
         let timeouts = TIMEOUTS.lock().unwrap();
         cache::Cache::new().maxage(timeouts.pamcache)
@@ -164,7 +170,7 @@ pub(crate) mod cached {
         }
 
         let mut pam_auth = pam_auth;
-        match pam_auth.auth(&service, &user, &pass, remip).await {
+        match pam_auth.auth(service, user, pass, remip).await {
             Err(e) => Err(e),
             Ok(()) => {
                 PAMCACHE.insert(key, user.to_owned());

@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 static THREAD_SWITCH_UGID_USED: AtomicBool = AtomicBool::new(false);
 
-#[cfg(all(target_os = "linux"))]
+#[cfg(target_os = "linux")]
 mod setuid {
     // On x86, the default SYS_setresuid is 16 bits. We need to
     // import the 32-bit variant.
@@ -61,8 +61,7 @@ mod setuid {
         }
 
         // get groups.
-        let mut groups = Vec::<u32>::with_capacity(size as usize);
-        groups.resize(size as usize, 0);
+        let mut groups = vec![0; size as usize];
         let res = unsafe { libc::syscall(SYS_getgroups, size as libc::c_int, groups.as_mut_ptr() as *mut _) };
 
         // sanity check.
@@ -70,8 +69,7 @@ mod setuid {
             if res < 0 {
                 return Err(oserr(res, format!("getgroups({}, buffer)", size)));
             }
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
+            return Err(io::Error::other(
                 format!("getgroups({}, buffer): returned {}", size, res),
             ));
         }
@@ -146,7 +144,7 @@ mod setuid {
                     if let Err(e) = setgroups(newgroups) {
                         panic!("{}", e);
                     }
-                    cur.groups.truncate(0);
+                    cur.groups.clear();
                     cur.groups.extend_from_slice(newgroups);
                 }
                 if newuid != cur.euid {
@@ -206,16 +204,13 @@ pub struct UgidSwitchGuard {
 
 impl UgidSwitch {
     pub fn new(creds: Option<(u32, u32, &[u32])>) -> UgidSwitch {
-        let target_creds = match creds {
-            Some((uid, gid, groups)) => {
-                Some(UgidCreds {
-                    uid,
-                    gid,
-                    groups: groups.into(),
-                })
-            },
-            None => None,
-        };
+        let target_creds = creds.map(|(uid, gid, groups)| {
+            UgidCreds {
+                uid,
+                gid,
+                groups: groups.into(),
+            }
+        });
         UgidSwitch { target_creds }
     }
 
@@ -228,8 +223,8 @@ impl UgidSwitch {
 
     pub fn guard(&self) -> UgidSwitchGuard {
         match &self.target_creds {
-            &None => UgidSwitchGuard { base_creds: None },
-            &Some(ref creds) => {
+            None => UgidSwitchGuard { base_creds: None },
+            Some(creds) => {
                 let (uid, gid, groups) = thread_switch_ugid(creds.uid, creds.gid, &creds.groups);
                 UgidSwitchGuard {
                     base_creds: Some(UgidCreds { uid, gid, groups }),

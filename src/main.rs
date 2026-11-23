@@ -5,9 +5,9 @@
 //! just like an ancient FTP server would (remember those?).
 //!
 //! This is an application. There is no API documentation here.
-//! If you want to build your _own_ webdav server, use the `webdav-handler` crate.
+//! If you want to build your _own_ webdav server, use the `dav-server` crate.
 //!
-//! See the [GitHub repository](https://github.com/miquels/webdav-server-rs/)
+//! See the [GitHub repository](https://github.com/ArcticLampyrid/webdav-server-rs/)
 //! for documentation on how to run the server.
 //!
 
@@ -26,25 +26,25 @@ mod tls;
 mod unixuser;
 mod userfs;
 
-use std::convert::TryFrom;
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs};
-use std::os::unix::io::{FromRawFd, AsRawFd};
 use std::process::exit;
 use std::sync::Arc;
+use std::time::Duration;
 
-use clap::clap_app;
+use bytes::Bytes;
+use clap::{Arg, ArgAction, Command};
+use dav_server::{davpath::DavPath, DavConfig, DavHandler, DavMethod, DavMethodSet};
+use dav_server::{fakels::FakeLs, fs::GuardedFileSystem, ls::DavLockSystem};
 use headers::{authorization::Basic, Authorization, HeaderMapExt};
 use http::status::StatusCode;
-use hyper::{
-    self,
-    server::conn::{AddrIncoming, AddrStream},
-    service::{make_service_fn, service_fn},
-};
-use tls_listener::TlsListener;
-use tokio_rustls::server::TlsStream;
-use webdav_handler::{davpath::DavPath, DavConfig, DavHandler, DavMethod, DavMethodSet};
-use webdav_handler::{fakels::FakeLs, fs::DavFileSystem, ls::DavLockSystem};
+use http_body_util::{combinators::BoxBody, BodyExt, Empty};
+use hyper::{body::Incoming, service::service_fn};
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
+use hyper_util::server::conn::auto;
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::net::TcpListener;
+use tokio_rustls::TlsAcceptor;
 
 use crate::config::{AcctType, Auth, CaseInsensitive, Handler, Location, OnNotfound};
 use crate::rootfs::RootFs;
@@ -53,7 +53,10 @@ use crate::suid::proc_switch_ugid;
 use crate::tls::tls_acceptor;
 use crate::userfs::UserFs;
 
-static PROGNAME: &'static str = "webdav-server";
+static PROGNAME: &str = "webdav-server";
+
+// How long a client may take to complete the TLS handshake.
+const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 // Contains "state" and a handle to the config.
 #[derive(Clone)]
@@ -63,8 +66,12 @@ struct Server {
     config: Arc<config::Config>,
 }
 
-type HttpResult = Result<hyper::Response<webdav_handler::body::Body>, io::Error>;
-type HttpRequest = http::Request<hyper::Body>;
+type HttpResult = Result<http::Response<dav_server::body::Body>, io::Error>;
+
+// Request body. It's boxed so that we can construct an empty body
+// when cloning a request (see `clone_httpreq`).
+pub(crate) type ReqBody = BoxBody<Bytes, hyper::Error>;
+pub(crate) type HttpRequest = http::Request<ReqBody>;
 
 // Server implementation.
 impl Server {
@@ -123,7 +130,7 @@ impl Server {
 
     // return a new response::Builder with the Server and CORS header set.
     fn response_builder(&self) -> http::response::Builder {
-        let mut builder = hyper::Response::builder();
+        let mut builder = http::Response::builder();
         self.set_headers(builder.headers_mut().unwrap());
         builder
     }
@@ -134,10 +141,9 @@ impl Server {
             .config
             .server
             .identification
-            .as_ref()
-            .map(|s| s.as_str())
+            .as_deref()
             .unwrap_or("webdav-server-rs");
-        if id != "" {
+        if !id.is_empty() {
             headers.insert("server", id.parse().unwrap());
         }
         if self.config.server.cors {
@@ -186,7 +192,7 @@ impl Server {
 
             // handle request.
             let res = self
-                .handle(req, method, path, route, location, remote_ip.clone())
+                .handle(req, method, path, route, location, remote_ip)
                 .await?;
 
             // no on_notfound? then this is final.
@@ -242,7 +248,7 @@ impl Server {
                 Err(status) => return self.auth_error(status, location).await,
             };
             // if there was a :user in the route, return error if it does not match.
-            if user_param.map(|u| u != &user).unwrap_or(false) {
+            if user_param.is_some_and(|u| u != user) {
                 debug!("handle: auth user and :user mismatch");
                 return self.auth_error(StatusCode::UNAUTHORIZED, location).await;
             }
@@ -268,9 +274,7 @@ impl Server {
         let prefix = match route.params[1].as_ref() {
             Some(p) => {
                 let mut start = p.start();
-                if start > 0 {
-                    start -= 1;
-                }
+                start = start.saturating_sub(1);
                 &path[..start]
             },
             None => path,
@@ -309,18 +313,18 @@ impl Server {
         let fs = match location.handler {
             Handler::Virtroot => {
                 let auth_user = auth_user.as_ref().map(String::to_owned);
-                RootFs::new(dir, auth_user, auth_ugid) as Box<dyn DavFileSystem>
+                RootFs::new(dir, auth_user, auth_ugid) as Box<dyn GuardedFileSystem<()>>
             },
             Handler::Filesystem => {
-                UserFs::new(dir, auth_ugid, true, case_insensitive, macos) as Box<dyn DavFileSystem>
+                UserFs::new(dir, auth_ugid, true, case_insensitive, macos) as Box<dyn GuardedFileSystem<()>>
             },
         };
 
         // Build a handler.
         let methods = location
             .methods
-            .unwrap_or(DavMethodSet::from_vec(vec!["GET", "HEAD"]).unwrap());
-        let hide_symlinks = location.hide_symlinks.clone().unwrap_or(true);
+            .unwrap_or_else(|| DavMethodSet::from_vec(vec!["GET", "HEAD"]).unwrap());
+        let hide_symlinks = location.hide_symlinks.unwrap_or(true);
 
         let mut config = DavConfig::new()
             .filesystem(fs)
@@ -377,25 +381,52 @@ impl Server {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // command line option processing.
-    let matches = clap_app!(webdav_server =>
-        (version: "0.3")
-        (@arg CFG: -c --config +takes_value "configuration file (/etc/webdav-server.toml)")
-        (@arg PORT: -p --port +takes_value "listen to this port on localhost only")
-        (@arg DBG: -D --debug "enable debug level logging")
-        (@arg DMP: -P --print_config "print configuration and exit")
-    )
-    .get_matches();
+    let matches = Command::new(PROGNAME)
+        .version(env!("CARGO_PKG_VERSION"))
+        .arg(
+            Arg::new("CFG")
+                .short('c')
+                .long("config")
+                .value_name("CFG")
+                .help("configuration file (/etc/webdav-server.toml)"),
+        )
+        .arg(
+            Arg::new("PORT")
+                .short('p')
+                .long("port")
+                .value_name("PORT")
+                .value_parser(clap::value_parser!(u16))
+                .help("listen to this port on localhost only"),
+        )
+        .arg(
+            Arg::new("DBG")
+                .short('D')
+                .long("debug")
+                .action(ArgAction::SetTrue)
+                .help("enable debug level logging"),
+        )
+        .arg(
+            Arg::new("DMP")
+                .short('P')
+                .long("print_config")
+                .action(ArgAction::SetTrue)
+                .help("print configuration and exit"),
+        )
+        .get_matches();
 
-    if matches.is_present("DBG") {
+    if matches.get_flag("DBG") {
         use env_logger::Env;
-        let level = "webdav_server=debug,webdav_handler=debug";
+        let level = "webdav_server=debug,dav_server=debug";
         env_logger::Builder::from_env(Env::default().default_filter_or(level)).init();
     } else {
         env_logger::init();
     }
 
-    let port = matches.value_of("PORT");
-    let cfg = matches.value_of("CFG").unwrap_or("/etc/webdav-server.toml");
+    let port = matches.get_one::<u16>("PORT").copied();
+    let cfg = matches
+        .get_one::<String>("CFG")
+        .map(|s| s.as_str())
+        .unwrap_or("/etc/webdav-server.toml");
 
     // read config.
     let mut config = match config::read(cfg) {
@@ -407,7 +438,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     config::check(cfg, &config);
 
-    if matches.is_present("DMP") {
+    if matches.get_flag("DMP") {
         println!("{:#?}", config);
         exit(0);
     }
@@ -420,8 +451,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if let Some(port) = port {
         let localhosts = vec![
-            ("127.0.0.1:".to_string() + port).parse::<SocketAddr>().unwrap(),
-            ("[::]:".to_string() + port).parse::<SocketAddr>().unwrap(),
+            SocketAddr::from(([127, 0, 0, 1], port)),
+            SocketAddr::from(([0u16; 8], port)),
         ];
         config.server.listen = config::OneOrManyAddr::Many(localhosts);
     }
@@ -455,39 +486,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // build servers (one for each listen address).
         let dav_server = Server::new(config.clone(), auth);
         let mut servers = Vec::new();
-        let mut tls_servers = Vec::new();
 
         // Plaintext servers.
         for sockaddr in addrs {
             let listener = match make_listener(&config.server, sockaddr) {
                 Ok(l) => l,
                 Err(e) => {
-                    eprintln!("{}: listener on {:?}: {}", PROGNAME, &sockaddr, e);
+                    eprintln!("{}: listener on {:?}: {}", PROGNAME, sockaddr, e);
                     exit(1);
                 },
             };
-            let dav_server = dav_server.clone();
-            let make_service = make_service_fn(move |socket: &AddrStream| {
-                let dav_server = dav_server.clone();
-                let remote_addr = socket.remote_addr();
-                async move {
-                    let func = move |req| {
-                        let dav_server = dav_server.clone();
-                        async move { dav_server.route(req, remote_addr).await }
-                    };
-                    Ok::<_, hyper::Error>(service_fn(func))
-                }
-            });
-            let incoming = AddrIncoming::from_listener(listener)?;
-            let server = hyper::Server::builder(incoming);
             println!("Listening on http://{:?}", sockaddr);
-
-            servers.push(async move {
-                if let Err(e) = server.serve(make_service).await {
-                    eprintln!("{}: server error: {}", PROGNAME, e);
-                    exit(1);
-                }
-            });
+            servers.push(accept_loop(listener, dav_server.clone(), None));
         }
 
         // TLS servers.
@@ -495,93 +505,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let tls_acceptor = tls_acceptor(&config.server)?;
 
             for sockaddr in tls_addrs {
-                let tls_acceptor = tls_acceptor.clone();
                 let listener = make_listener(&config.server, sockaddr).unwrap_or_else(|e| {
-                    eprintln!("{}: listener on {:?}: {}", PROGNAME, &sockaddr, e);
+                    eprintln!("{}: listener on {:?}: {}", PROGNAME, sockaddr, e);
                     exit(1);
                 });
-                let dav_server = dav_server.clone();
-                let make_service = make_service_fn(move |stream: &TlsStream<AddrStream>| {
-                    let dav_server = dav_server.clone();
-                    let remote_addr = stream.get_ref().0.remote_addr();
-                    async move {
-                        let func = move |req| {
-                            let dav_server = dav_server.clone();
-                            async move { dav_server.route(req, remote_addr).await }
-                        };
-                        Ok::<_, hyper::Error>(service_fn(func))
-                    }
-                });
-
-                // Since the server can exit when there's an error on the TlsStream,
-                // we run it in a loop. Every time the loop is entered we dup() the
-                // listening fd and create a new TcpListener. This way, we should
-                // not lose any pending connections during a restart.
-                let master_listen_fd = listener.as_raw_fd();
-                std::mem::forget(listener);
-
                 println!("Listening on https://{:?}", sockaddr);
-                tls_servers.push(async move {
-                    loop {
-                        // reuse the incoming socket after the server exits.
-                        let listen_fd = match nix::unistd::dup(master_listen_fd) {
-                            Ok(fd) => fd,
-                            Err(e) => {
-                                eprintln!("{}: server error: dup: {}", PROGNAME, e);
-                                break;
-                            }
-                        };
-                        // SAFETY: listen_fd is unique (we just dup'ed it).
-                        let std_listen = unsafe { std::net::TcpListener::from_raw_fd(listen_fd) };
-                        let listener = match tokio::net::TcpListener::from_std(std_listen) {
-                            Ok(l) => l,
-                            Err(e) => {
-                                eprintln!("{}: server error: new TcpListener: {}", PROGNAME, e);
-                                break;
-                            }
-                        };
-                        let a_incoming = match AddrIncoming::from_listener(listener) {
-                            Ok(a) => a,
-                            Err(e) => {
-                                eprintln!("{}: server error: new AddrIncoming: {}", PROGNAME, e);
-                                break;
-                            }
-                        };
-                        let incoming = TlsListener::new(tls_acceptor.clone(), a_incoming);
-                        let server = hyper::Server::builder(incoming);
-                        if let Err(e) = server.serve(make_service.clone()).await {
-                            eprintln!("{}: server error: {} (retrying)", PROGNAME, e);
-                        }
-                    }
-                });
+                servers.push(accept_loop(listener, dav_server.clone(), Some(tls_acceptor.clone())));
             }
         }
 
         // drop privs.
-        match (&config.server.uid, &config.server.gid) {
-            (&Some(uid), &Some(gid)) => {
-                if !suid::have_suid_privs() {
-                    eprintln!(
-                        "{}: insufficent priviliges to switch uid/gid (not root).",
-                        PROGNAME
-                    );
-                    exit(1);
-                }
-                let keep_privs = config.location.iter().any(|l| l.setuid);
-                proc_switch_ugid(uid, gid, keep_privs);
-            },
-            _ => {},
+        if let (Some(uid), Some(gid)) = (config.server.uid, config.server.gid) {
+            if !suid::have_suid_privs() {
+                eprintln!(
+                    "{}: insufficent priviliges to switch uid/gid (not root).",
+                    PROGNAME
+                );
+                exit(1);
+            }
+            let keep_privs = config.location.iter().any(|l| l.setuid);
+            proc_switch_ugid(uid, gid, keep_privs);
         }
 
         // spawn all servers, and wait for them to finish.
-        let mut tasks = Vec::new();
-        for server in servers.drain(..) {
-            tasks.push(tokio::spawn(server));
-        }
-        for server in tls_servers.drain(..) {
-            tasks.push(tokio::spawn(server));
-        }
-        for task in tasks.drain(..) {
+        let tasks: Vec<_> = servers.into_iter().map(tokio::spawn).collect();
+        for task in tasks {
             let _ = task.await;
         }
 
@@ -589,21 +537,81 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     })
 }
 
+// Accept connections on a listener, and serve each one on its own task.
+//
+// Errors on individual connections (including failed TLS handshakes)
+// only affect that connection; the accept loop keeps running.
+async fn accept_loop(listener: TcpListener, dav_server: Server, tls_acceptor: Option<TlsAcceptor>) {
+    loop {
+        let (stream, remote_addr) = match listener.accept().await {
+            Ok(s) => s,
+            Err(e) => {
+                if !is_connection_error(&e) {
+                    // Most likely out of filedescriptors. Back off for a bit
+                    // so that we do not spin on accept().
+                    error!("accept error: {}", e);
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+                continue;
+            },
+        };
+        let dav_server = dav_server.clone();
+        match tls_acceptor.clone() {
+            None => {
+                tokio::spawn(serve_connection(dav_server, stream, remote_addr));
+            },
+            Some(tls_acceptor) => {
+                tokio::spawn(async move {
+                    match tokio::time::timeout(TLS_HANDSHAKE_TIMEOUT, tls_acceptor.accept(stream)).await {
+                        Ok(Ok(stream)) => serve_connection(dav_server, stream, remote_addr).await,
+                        Ok(Err(e)) => debug!("{}: TLS handshake failed: {}", remote_addr, e),
+                        Err(_) => debug!("{}: TLS handshake timed out", remote_addr),
+                    }
+                });
+            },
+        }
+    }
+}
+
+// Errors from accept() that are about a single connection, not the listener.
+fn is_connection_error(e: &io::Error) -> bool {
+    matches!(
+        e.kind(),
+        io::ErrorKind::ConnectionRefused | io::ErrorKind::ConnectionAborted | io::ErrorKind::ConnectionReset
+    )
+}
+
+// Serve HTTP/1.1 and HTTP/2 on a single connection.
+async fn serve_connection<S>(dav_server: Server, stream: S, remote_addr: SocketAddr)
+where S: AsyncRead + AsyncWrite + Send + Unpin + 'static {
+    let service = service_fn(move |req: http::Request<Incoming>| {
+        let dav_server = dav_server.clone();
+        async move { dav_server.route(req.map(BodyExt::boxed), remote_addr).await }
+    });
+    let mut builder = auto::Builder::new(TokioExecutor::new());
+    builder.http1().timer(TokioTimer::new());
+    builder.http2().timer(TokioTimer::new());
+    if let Err(e) = builder.serve_connection(TokioIo::new(stream), service).await {
+        debug!("{}: connection error: {}", remote_addr, e);
+    }
+}
+
 // Clones a http request with an empty body.
 fn clone_httpreq(req: &HttpRequest) -> HttpRequest {
     let mut builder = http::Request::builder()
         .method(req.method().clone())
         .uri(req.uri().clone())
-        .version(req.version().clone());
+        .version(req.version());
     for (name, value) in req.headers().iter() {
         builder = builder.header(name, value);
     }
-    builder.body(hyper::Body::empty()).unwrap()
+    let body = Empty::<Bytes>::new().map_err(|never| match never {}).boxed();
+    builder.body(body).unwrap()
 }
 
 fn expand_directory(dir: &str, pwd: Option<&Arc<unixuser::User>>) -> Result<String, StatusCode> {
     // If it doesn't start with "~", skip.
-    if !dir.starts_with("~") {
+    if !dir.starts_with('~') {
         return Ok(dir.to_string());
     }
     // ~whatever doesn't work.
@@ -625,7 +633,7 @@ fn expand_directory(dir: &str, pwd: Option<&Arc<unixuser::User>>) -> Result<Stri
 
 // Make a new TcpListener, and if it's a V6 listener, set the
 // V6_V6ONLY socket option on it.
-fn make_listener(srv: &config::Server, addr: SocketAddr) -> io::Result<tokio::net::TcpListener> {
+fn make_listener(srv: &config::Server, addr: SocketAddr) -> io::Result<TcpListener> {
     use socket2::{Domain, SockAddr, Socket, Type, Protocol};
     let s = Socket::new(Domain::for_address(addr), Type::STREAM, Some(Protocol::TCP))?;
     if let Some(cong) = srv.congestion_control.as_ref() {
@@ -640,11 +648,11 @@ fn make_listener(srv: &config::Server, addr: SocketAddr) -> io::Result<tokio::ne
         s.set_only_v6(true)?;
     }
     s.set_nonblocking(true)?;
-    s.set_nodelay(true)?;
+    s.set_tcp_nodelay(true)?;
     s.set_reuse_address(true)?;
     let addr: SockAddr = addr.into();
     s.bind(&addr)?;
     s.listen(128)?;
     let listener: std::net::TcpListener = s.into();
-    tokio::net::TcpListener::from_std(listener)
+    TcpListener::from_std(listener)
 }

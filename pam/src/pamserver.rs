@@ -8,9 +8,9 @@ use std::os::unix::io::AsRawFd;
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::sync::{Arc, Mutex};
 
-use bincode::{deserialize, serialize};
-use libc;
+use serde::{Deserialize, Serialize};
 
+use crate::wire::{deserialize, serialize};
 use crate::pam::{pam_auth, pam_lower_rlimits, PamError};
 use crate::pamclient::PamRequest;
 
@@ -93,8 +93,7 @@ impl PamServer {
             }
 
             // read request data.
-            let mut data = Vec::with_capacity(sz);
-            data.resize(sz, 0u8);
+            let mut data = vec![0u8; sz];
             let res = self.rx_socket.read_exact(&mut data);
             if let Err(e) = res {
                 panic!("PamServer::serve: read socket: {}", e);
@@ -127,8 +126,7 @@ impl PamServer {
                         pool.queued_count()
                     );
                 }
-                i += 1;
-                i = i % 400;
+                i = (i + 1) % 400;
                 std::thread::sleep(std::time::Duration::from_millis(5));
             }
         }
@@ -144,7 +142,7 @@ fn pam_process(req: PamRequest, sock: Arc<Mutex<StdUnixStream>>) -> Result<(), i
     trace!("PamServer::pam_process: starting with request {:?}", req);
 
     // authenticate.
-    let remip = req.remip.as_ref().map(|s| s.as_str()).unwrap_or("");
+    let remip = req.remip.as_deref().unwrap_or("");
     let res = PamResponse {
         id:     req.id,
         result: pam_auth(&req.service, &req.user, &req.pass, remip),
@@ -153,7 +151,7 @@ fn pam_process(req: PamRequest, sock: Arc<Mutex<StdUnixStream>>) -> Result<(), i
     // and send back result.
     trace!("PamServer::pam_process: returning response {:?}", res);
     let mut response: Vec<u8> = serialize(&res)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("error serializing response: {}", e)))?;
+        .map_err(|e| io::Error::other(format!("error serializing response: {}", e)))?;
     let l1 = ((response.len() >> 8) & 0xff) as u8;
     let l2 = (response.len() & 0xff) as u8;
     response.insert(0, l1);

@@ -7,7 +7,7 @@ use crate::config::{AuthType, Config, Location};
 use headers::{authorization::Basic, Authorization, HeaderMapExt};
 use http::status::StatusCode;
 
-type HttpRequest = http::Request<hyper::Body>;
+use crate::HttpRequest;
 
 #[derive(Clone)]
 pub struct Auth {
@@ -25,7 +25,7 @@ impl Auth {
             if let Some(timeout) = config.pam.cache_timeout {
                 crate::cache::cached::set_pamcache_timeout(timeout);
             }
-            pam_sandboxed::PamAuth::new(config.pam.threads.clone())?
+            pam_sandboxed::PamAuth::new(config.pam.threads)?
         };
 
         Ok(Auth {
@@ -60,7 +60,7 @@ impl Auth {
         match auth_type {
             #[cfg(feature = "pam")]
             Some(&AuthType::Pam) => self.auth_pam(req, user, pass, _remote_ip).await,
-            Some(&AuthType::HtPasswd(ref ht)) => self.auth_htpasswd(user, pass, ht.as_str()).await,
+            Some(AuthType::HtPasswd(ht)) => self.auth_htpasswd(user, pass, ht.as_str()).await,
             None => {
                 debug!("need authentication, but auth-type is not set");
                 Err(StatusCode::UNAUTHORIZED)
@@ -94,7 +94,7 @@ impl Auth {
                 std::net::IpAddr::V6(ip) => ip.to_string(),
             })
         };
-        let ip_ref = ip_string.as_ref().map(|s| s.as_str());
+        let ip_ref = ip_string.as_deref();
 
         // authenticate.
         let service = self.config.pam.service.as_str();
@@ -137,7 +137,7 @@ impl Auth {
             let lines = data
                 .split('\n')
                 .map(|s| s.trim())
-                .filter(|s| !s.starts_with("#") && !s.is_empty());
+                .filter(|s| !s.starts_with('#') && !s.is_empty());
 
             // Check each line for a match.
             for line in lines {

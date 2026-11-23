@@ -83,10 +83,10 @@ pub(crate) fn get_quota(entry: &Mtab, uid: u32) -> Result<FsQuota, FqError> {
 
     let m = |v| if v == 0xffffffffffffffff { None } else { Some(v) };
     let res = FsQuota {
-        bytes_used:  bytes_used,
+        bytes_used,
         bytes_limit: m(bytes_limit),
-        files_used:  files_used,
+        files_used,
         files_limit: m(files_limit),
     };
-    return Ok(res);
+    Ok(res)
 }

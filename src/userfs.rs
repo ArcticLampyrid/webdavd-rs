@@ -1,16 +1,21 @@
 use std::any::Any;
 use std::path::{Path, PathBuf};
 
-use webdav_handler::davpath::DavPath;
-use webdav_handler::fs::*;
-use webdav_handler::localfs::LocalFs;
+use dav_server::davpath::DavPath;
+use dav_server::fs::{
+    DavDirEntry, DavFile, DavFileSystem, DavMetaData, FsFuture, FsStream, OpenOptions, ReadDirMeta,
+};
+use dav_server::localfs::LocalFs;
 
 use crate::suid::UgidSwitch;
 
 #[derive(Clone)]
 pub struct UserFs {
     pub fs:  LocalFs,
+    // basedir and uid are only used for quota lookups.
+    #[cfg_attr(not(feature = "quota"), allow(dead_code))]
     basedir: PathBuf,
+    #[cfg_attr(not(feature = "quota"), allow(dead_code))]
     uid:     u32,
 }
 
@@ -27,8 +32,9 @@ impl UserFs {
         let uid = target_creds.as_ref().map(|ugid| ugid.0).unwrap_or(0);
 
         // set up the LocalFs hooks for uid switching.
-        let switch = UgidSwitch::new(target_creds.clone());
-        let blocking_guard = Box::new(move || Box::new(switch.guard()) as Box<dyn Any>);
+        let switch = UgidSwitch::new(target_creds);
+        let blocking_guard: Box<dyn Fn() -> Box<dyn Any> + Send + Sync> =
+            Box::new(move || Box::new(switch.guard()) as Box<dyn Any>);
 
         Box::new(UserFs {
             basedir: dir.as_ref().to_path_buf(),
@@ -39,17 +45,17 @@ impl UserFs {
                 macos,
                 Some(blocking_guard),
             ),
-            uid:     uid,
+            uid,
         })
     }
 }
 
 impl DavFileSystem for UserFs {
-    fn metadata<'a>(&'a self, path: &'a DavPath) -> FsFuture<Box<dyn DavMetaData>> {
+    fn metadata<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, Box<dyn DavMetaData>> {
         self.fs.metadata(path)
     }
 
-    fn symlink_metadata<'a>(&'a self, path: &'a DavPath) -> FsFuture<Box<dyn DavMetaData>> {
+    fn symlink_metadata<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, Box<dyn DavMetaData>> {
         self.fs.symlink_metadata(path)
     }
 
@@ -57,38 +63,39 @@ impl DavFileSystem for UserFs {
         &'a self,
         path: &'a DavPath,
         meta: ReadDirMeta,
-    ) -> FsFuture<FsStream<Box<dyn DavDirEntry>>>
+    ) -> FsFuture<'a, FsStream<Box<dyn DavDirEntry>>>
     {
         self.fs.read_dir(path, meta)
     }
 
-    fn open<'a>(&'a self, path: &'a DavPath, options: OpenOptions) -> FsFuture<Box<dyn DavFile>> {
+    fn open<'a>(&'a self, path: &'a DavPath, options: OpenOptions) -> FsFuture<'a, Box<dyn DavFile>> {
         self.fs.open(path, options)
     }
 
-    fn create_dir<'a>(&'a self, path: &'a DavPath) -> FsFuture<()> {
+    fn create_dir<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, ()> {
         self.fs.create_dir(path)
     }
 
-    fn remove_dir<'a>(&'a self, path: &'a DavPath) -> FsFuture<()> {
+    fn remove_dir<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, ()> {
         self.fs.remove_dir(path)
     }
 
-    fn remove_file<'a>(&'a self, path: &'a DavPath) -> FsFuture<()> {
+    fn remove_file<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, ()> {
         self.fs.remove_file(path)
     }
 
-    fn rename<'a>(&'a self, from: &'a DavPath, to: &'a DavPath) -> FsFuture<()> {
+    fn rename<'a>(&'a self, from: &'a DavPath, to: &'a DavPath) -> FsFuture<'a, ()> {
         self.fs.rename(from, to)
     }
 
-    fn copy<'a>(&'a self, from: &'a DavPath, to: &'a DavPath) -> FsFuture<()> {
+    fn copy<'a>(&'a self, from: &'a DavPath, to: &'a DavPath) -> FsFuture<'a, ()> {
         self.fs.copy(from, to)
     }
 
     #[cfg(feature = "quota")]
-    fn get_quota<'a>(&'a self) -> FsFuture<(u64, Option<u64>)> {
+    fn get_quota(&self) -> FsFuture<'_, (u64, Option<u64>)> {
         use crate::cache;
+        use dav_server::fs::FsError;
         use fs_quota::*;
         use futures::future::FutureExt;
         use std::time::Duration;
@@ -99,7 +106,7 @@ impl DavFileSystem for UserFs {
 
         async move {
             let mut key = self.basedir.clone();
-            key.push(&self.uid.to_string());
+            key.push(self.uid.to_string());
             let r = match QCACHE.get(&key) {
                 Some(r) => {
                     debug!("get_quota for {:?}: from cache", key);

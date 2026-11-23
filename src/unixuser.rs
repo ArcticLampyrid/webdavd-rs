@@ -1,4 +1,3 @@
-use std;
 use std::ffi::{CStr, OsStr};
 use std::io;
 use std::os::unix::ffi::OsStrExt;
@@ -6,6 +5,8 @@ use std::path::{Path, PathBuf};
 
 use tokio::task::block_in_place;
 
+// Mirrors `struct passwd`; not every field is used.
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct User {
     pub name:   String,
@@ -20,7 +21,7 @@ pub struct User {
 
 unsafe fn cptr_to_osstr<'a>(c: *const libc::c_char) -> &'a OsStr {
     let bytes = CStr::from_ptr(c).to_bytes();
-    OsStr::from_bytes(&bytes)
+    OsStr::from_bytes(bytes)
 }
 
 unsafe fn cptr_to_path<'a>(c: *const libc::c_char) -> &'a Path {
@@ -94,7 +95,7 @@ impl User {
                 // Keep it as is, not filtering.
                 // Some systems requires the GID to be in the list, for some mechanisms (eg. ACL) to work.
                 // See also #25.
-                groups_vec.extend(groups.iter().map(|&g| g as u32));
+                groups_vec.extend(groups.iter().copied());
                 user.groups = groups_vec;
             }
         }

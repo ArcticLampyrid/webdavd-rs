@@ -1,5 +1,8 @@
 # WEBDAV-SERVER
 
+> [!TIP]  
+> [ArcticLampyrid/webdav-server-rs](https://github.com/ArcticLampyrid/webdav-server-rs) is a fork of [miquels/webdav-server-rs](https://github.com/miquels/webdav-server-rs) that brings a modernized codebase, bug fixes, and new features.
+
 An implementation of a webdav server with support for user accounts,
 and switching uid/gid to those users accounts. That last feature
 is Linux-only, since the server is threaded and no other OSes have
@@ -12,8 +15,7 @@ most users of this software want to put an NGNIX or Apache reverse-proxy
 in front of it anyway, and that frontend can implement TLS, logging,
 enforcing a maximum number of connections, and timeouts.
 
-This crate uses futures 0.3 and async/await, so the minimum rust
-compiler version is 1.39.
+Building this crate requires a modern Rust toolchain.
 
 ## Features.
 
@@ -52,9 +54,14 @@ If the client IP adress is localhost (127/8 or ::1) then the content of
 the X-Forwarded-For header is used instead (if present) to allow for
 aforementioned frontend proxies.
 
+## Authors.
+
+ * [Miquel van Smoorenburg](https://github.com/miquels) — original author
+ * [alampy](https://alampy.com) — maintainer of this fork
+
 ## Copyright and License.
 
- * © 2018, 2019 XS4ALL Internet bv
- * © 2018, 2019 Miquel van Smoorenburg
+ * © 2018~2019 [XS4ALL Internet bv](https://www.xs4all.nl/)
+ * © 2018~2019 [Miquel van Smoorenburg](https://github.com/miquels)
+ * © 2024~2026 [alampy](https://alampy.com)
  * [Apache License, Version 2.0](http://www.apache.org/licenses/LICENSE-2.0)
-

@@ -3,6 +3,8 @@ use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_void};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use serde::{Deserialize, Serialize};
+
 extern "C" {
     fn c_pam_auth(
         service: *const c_char,
@@ -45,17 +47,13 @@ impl std::fmt::Display for PamError {
                 let errnum = self.0 as c_int;
                 let nullptr: *const c_void = std::ptr::null();
                 let errstr = unsafe { CStr::from_ptr(pam_strerror(nullptr, errnum)).to_string_lossy() };
-                f.write_str(&format!("PAM error: {}", errstr))
+                write!(f, "PAM error: {}", errstr)
             },
         }
     }
 }
 
 impl Error for PamError {
-    fn description(&self) -> &str {
-        "PAM authentication error"
-    }
-
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         None
     }

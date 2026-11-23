@@ -6,7 +6,7 @@ use std::fmt::Debug;
 
 use lazy_static::lazy_static;
 use regex::bytes::{Match, Regex, RegexSet};
-use webdav_handler::{DavMethod, DavMethodSet};
+use dav_server::{DavMethod, DavMethodSet};
 
 // internal representation of a route.
 #[derive(Debug)]
@@ -156,7 +156,7 @@ impl<T: Debug> Builder<T> {
     pub fn build(&mut self) -> Router<T> {
         let set = RegexSet::new(self.routes.iter().map(|r| r.regex.as_str())).unwrap();
         Router {
-            routes: std::mem::replace(&mut self.routes, Vec::new()),
+            routes: std::mem::take(&mut self.routes),
             set,
         }
     }
@@ -201,7 +201,7 @@ impl<T: Debug> Router<T> {
                 let mut params = Vec::new();
                 if let Some(caps) = route.regex.captures(path) {
                     for name in param_names {
-                        params.push(caps.name(name).map(|p| Param(p)));
+                        params.push(caps.name(name).map(Param));
                     }
                 } else {
                     for _ in param_names {
@@ -222,19 +222,19 @@ impl<T: Debug> Router<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use webdav_handler::DavMethod;
+    use dav_server::DavMethod;
 
     fn test_match(rtr: &Router<usize>, p: &[u8], user: &str, path: &str) {
         let x = rtr.matches(p, DavMethod::Get, &["user", "path"]);
-        assert!(x.len() > 0);
+        assert!(!x.is_empty());
         let x = &x[0];
-        if user != "" {
+        if !user.is_empty() {
             assert!(x.params[0]
                 .as_ref()
                 .map(|b| b.as_bytes() == user.as_bytes())
                 .unwrap_or(false));
         }
-        if path != "" {
+        if !path.is_empty() {
             assert!(x.params[1]
                 .as_ref()
                 .map(|b| b.as_bytes() == path.as_bytes())

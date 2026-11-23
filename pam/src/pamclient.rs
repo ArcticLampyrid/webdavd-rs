@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex, Once};
 use futures::channel::{mpsc, oneshot};
 use futures::join;
 use futures::{sink::SinkExt, stream::StreamExt};
+use serde::{Deserialize, Serialize};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::unix::ReadHalf as UnixReadHalf;
@@ -64,12 +65,12 @@ impl PamAuth {
     /// ```no_run
     /// use pam_sandboxed::PamAuth;
     ///
-    /// fn main() -> Result<(), Box<std::error::Error>> {
+    /// fn main() -> Result<(), Box<dyn std::error::Error>> {
     ///     // get pam authentication handle.
     ///     let mut pam = PamAuth::new(None)?;
     ///
     ///     // now start tokio runtime and use handle.
-    ///     let mut rt = tokio::runtime::Runtime::new()?;
+    ///     let rt = tokio::runtime::Runtime::new()?;
     ///     rt.block_on(async move {
     ///         let res = pam.auth("other", "user", "pass", None).await;
     ///         println!("pam auth result: {:?}", res);
@@ -130,10 +131,7 @@ impl PamAuth {
         let (tx, rx) = oneshot::channel::<Result<(), PamError>>();
 
         // put it all together and send it.
-        let req1 = PamRequest1 {
-            req:       req,
-            resp_chan: tx,
-        };
+        let req1 = PamRequest1 { req, resp_chan: tx };
         let mut authtask_chan = inner.req_chan.borrow().as_ref().unwrap().clone();
         authtask_chan
             .send(req1)
@@ -202,7 +200,7 @@ impl PamAuthTask {
             }
 
             // serialize data and send.
-            let mut data: Vec<u8> = match bincode::serialize(&req) {
+            let mut data: Vec<u8> = match crate::wire::serialize(&req) {
                 Ok(data) => data,
                 Err(e) => {
                     // this panic can never happen at runtime.
@@ -230,22 +228,21 @@ impl PamAuthTask {
         loop {
             // read size header.
             let mut buf = [0u8; 2];
-            if let Err(_) = srx.read_exact(&mut buf).await {
+            if srx.read_exact(&mut buf).await.is_err() {
                 error!("PamClient: FATAL: short read, server gone away?!");
                 return;
             }
             let sz = ((buf[0] as usize) << 8) + (buf[1] as usize);
 
             // read response data.
-            let mut data = Vec::with_capacity(sz);
-            data.resize(sz, 0u8);
-            if let Err(_) = srx.read_exact(&mut data[..]).await {
+            let mut data = vec![0u8; sz];
+            if srx.read_exact(&mut data[..]).await.is_err() {
                 error!("PamClient: FATAL: short read, server gone away?!");
                 return;
             }
 
             // deserialize.
-            let resp: PamResponse = match bincode::deserialize(&data[..]) {
+            let resp: PamResponse = match crate::wire::deserialize(&data[..]) {
                 Ok(req) => req,
                 Err(_) => {
                     // this panic can never happen at runtime.

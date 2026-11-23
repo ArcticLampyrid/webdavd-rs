@@ -210,31 +210,25 @@ fn get_mtab_entry(path: impl AsRef<Path>) -> Result<Mtab, FqError> {
             // multiple matching entries.. happens on NFS.
 
             // get "realpath" of the path that was passed in.
-            let rp = match realpath(path) {
-                Ok(p) => p,
-                Err(e) => return Err(e.into()),
-            };
+            let rp = realpath(path)?;
 
             // realpath the remaining entries as well..
             let mut v = Vec::new();
             for mut e in ents.into_iter() {
-                match realpath(&e.directory) {
-                    Ok(p) => {
-                        let c = String::from_utf8_lossy(p.as_os_str().as_bytes());
-                        e.directory = c.to_string();
-                        v.push(e);
-                    },
-                    Err(_) => {},
+                if let Ok(p) = realpath(&e.directory) {
+                    let c = String::from_utf8_lossy(p.as_os_str().as_bytes());
+                    e.directory = c.to_string();
+                    v.push(e);
                 }
             }
-            if v.len() == 0 {
+            if v.is_empty() {
                 return Err(FqError::NoQuota);
             }
 
             // find longest match.
             v.sort_by_key(|e| e.directory.clone());
             v.reverse();
-            match v.iter().position(|ref x| rp.starts_with(&x.directory)) {
+            match v.iter().position(|x| rp.starts_with(&x.directory)) {
                 Some(p) => v[p].clone(),
                 None => {
                     return Err(FqError::NoQuota);
@@ -258,19 +252,19 @@ impl From<std::ffi::NulError> for FqError {
 }
 
 fn to_num(e: &FqError) -> u32 {
-    match e {
-        &FqError::PermissionDenied => 1,
-        &FqError::NoQuota => 2,
-        &FqError::IoError(_) => 3,
-        &FqError::Other => 4,
+    match *e {
+        FqError::PermissionDenied => 1,
+        FqError::NoQuota => 2,
+        FqError::IoError(_) => 3,
+        FqError::Other => 4,
     }
 }
 
 impl PartialEq for FqError {
     fn eq(&self, other: &Self) -> bool {
         match self {
-            &FqError::IoError(ref e) => {
-                if let &FqError::IoError(ref o) = other {
+            FqError::IoError(e) => {
+                if let FqError::IoError(o) = other {
                     e.kind() == o.kind()
                 } else {
                     false
