@@ -1,7 +1,7 @@
-# WEBDAV-SERVER
+# WEBDAVD
 
 > [!TIP]  
-> [ArcticLampyrid/webdav-server-rs](https://github.com/ArcticLampyrid/webdav-server-rs) is a fork of [miquels/webdav-server-rs](https://github.com/miquels/webdav-server-rs) that brings a modernized codebase, bug fixes, and new features.
+> [ArcticLampyrid/webdavd-rs](https://github.com/ArcticLampyrid/webdavd-rs) is a fork of [miquels/webdav-server-rs](https://github.com/miquels/webdav-server-rs) that brings a modernized codebase, bug fixes, and new features.
 
 An implementation of a webdav server with support for user accounts,
 and switching uid/gid to those users accounts. That last feature
@@ -43,7 +43,7 @@ cargo build --release --no-default-features --features=quota
 
 ## Configuration.
 
-See the [example webdav-server.toml file](webdav-server.toml)
+See the [example webdavd.toml file](webdavd.toml)
 
 There is also an [example nginx proxy](examples/nginx-proxy.conf) configuration.
 

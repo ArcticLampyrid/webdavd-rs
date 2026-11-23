@@ -24,6 +24,6 @@ An implementation of a webdav server with support for user accounts, and switchi
 
 ## Code of Conduct
 - Star the repository to show support if this project helps you.
-- Contribute [ArcticLampyrid/webdav-server-rs](https://github.com/ArcticLampyrid/webdav-server-rs) by submitting bug fixes and enhancements.
+- Contribute [ArcticLampyrid/webdavd-rs](https://github.com/ArcticLampyrid/webdavd-rs) by submitting bug fixes and enhancements.
 - Submit issues and pull requests actively to help report bugs, suggest features, and improve the codebase.
 - Keep language concise and unambiguous, following ASD-STE100 principles for clear documentation and comments.

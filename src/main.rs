@@ -1,5 +1,5 @@
-#![doc(html_root_url = "https://docs.rs/webdav-server/0.4.0")]
-//! # `webdav-server` is a webdav server that handles user-accounts.
+#![doc(html_root_url = "https://docs.rs/webdavd/0.4.0")]
+//! # `webdavd` is a webdav server that handles user-accounts.
 //!
 //! This is a webdav server that allows access to a users home directory,
 //! just like an ancient FTP server would (remember those?).
@@ -7,7 +7,7 @@
 //! This is an application. There is no API documentation here.
 //! If you want to build your _own_ webdav server, use the `dav-server` crate.
 //!
-//! See the [GitHub repository](https://github.com/ArcticLampyrid/webdav-server-rs/)
+//! See the [GitHub repository](https://github.com/ArcticLampyrid/webdavd-rs/)
 //! for documentation on how to run the server.
 //!
 
@@ -53,7 +53,7 @@ use crate::suid::proc_switch_ugid;
 use crate::tls::tls_acceptor;
 use crate::userfs::UserFs;
 
-static PROGNAME: &str = "webdav-server";
+static PROGNAME: &str = "webdavd";
 
 // How long a client may take to complete the TLS handshake.
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -135,14 +135,14 @@ impl Server {
         builder
     }
 
-    // Set Server: webdav-server-rs header, and CORS.
+    // Set Server: webdavd-rs header, and CORS.
     fn set_headers(&self, headers: &mut http::HeaderMap<http::header::HeaderValue>) {
         let id = self
             .config
             .server
             .identification
             .as_deref()
-            .unwrap_or("webdav-server-rs");
+            .unwrap_or("webdavd-rs");
         if !id.is_empty() {
             headers.insert("server", id.parse().unwrap());
         }
@@ -388,7 +388,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .short('c')
                 .long("config")
                 .value_name("CFG")
-                .help("configuration file (/etc/webdav-server.toml)"),
+                .help("configuration file (/etc/webdavd.toml)"),
         )
         .arg(
             Arg::new("PORT")
@@ -416,7 +416,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if matches.get_flag("DBG") {
         use env_logger::Env;
-        let level = "webdav_server=debug,dav_server=debug";
+        let level = "webdavd=debug,dav_server=debug";
         env_logger::Builder::from_env(Env::default().default_filter_or(level)).init();
     } else {
         env_logger::init();
@@ -426,7 +426,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cfg = matches
         .get_one::<String>("CFG")
         .map(|s| s.as_str())
-        .unwrap_or("/etc/webdav-server.toml");
+        .unwrap_or("/etc/webdavd.toml");
 
     // read config.
     let mut config = match config::read(cfg) {

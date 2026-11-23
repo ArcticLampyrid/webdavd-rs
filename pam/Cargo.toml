@@ -9,8 +9,8 @@ name = "pam-sandboxed"
 version = "0.2.0"
 
 documentation = "https://docs.rs/pam-sandboxed"
-repository = "https://github.com/ArcticLampyrid/webdav-server-rs"
-homepage = "https://github.com/ArcticLampyrid/webdav-server-rs/tree/main/pam"
+repository = "https://github.com/ArcticLampyrid/webdavd-rs"
+homepage = "https://github.com/ArcticLampyrid/webdavd-rs/tree/main/pam"
 authors = [
     "Miquel van Smoorenburg <mike@langeraar.net>",
     "alampy <https://alampy.com>",

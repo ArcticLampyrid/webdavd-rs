@@ -9,8 +9,8 @@ name = "fs-quota"
 version = "0.1.0"
 
 documentation = "https://docs.rs/fs-quota"
-repository = "https://github.com/ArcticLampyrid/webdav-server-rs"
-homepage = "https://github.com/ArcticLampyrid/webdav-server-rs/tree/main/fs_quota"
+repository = "https://github.com/ArcticLampyrid/webdavd-rs"
+homepage = "https://github.com/ArcticLampyrid/webdavd-rs/tree/main/fs_quota"
 authors = [
     "Miquel van Smoorenburg <mike@langeraar.net>",
     "alampy <https://alampy.com>",
