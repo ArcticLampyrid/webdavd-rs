@@ -8,14 +8,14 @@ use std::os::unix::io::AsRawFd;
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::sync::{Arc, Mutex};
 
-use serde::{Deserialize, Serialize};
+use rkyv::{Archive, Deserialize, Serialize};
 
 use crate::wire::{deserialize, serialize};
 use crate::pam::{pam_auth, pam_lower_rlimits, PamError};
 use crate::pamclient::PamRequest;
 
 // Response back from the server process.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize)]
 pub(crate) struct PamResponse {
     pub id:     u64,
     pub result: Result<(), PamError>,
@@ -151,7 +151,8 @@ fn pam_process(req: PamRequest, sock: Arc<Mutex<StdUnixStream>>) -> Result<(), i
     // and send back result.
     trace!("PamServer::pam_process: returning response {:?}", res);
     let mut response: Vec<u8> = serialize(&res)
-        .map_err(|e| io::Error::other(format!("error serializing response: {}", e)))?;
+        .map_err(|e| io::Error::other(format!("error serializing response: {}", e)))?
+        .into_vec();
     let l1 = ((response.len() >> 8) & 0xff) as u8;
     let l2 = (response.len() & 0xff) as u8;
     response.insert(0, l1);

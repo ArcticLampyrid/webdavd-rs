@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, Once};
 use futures::channel::{mpsc, oneshot};
 use futures::join;
 use futures::{sink::SinkExt, stream::StreamExt};
-use serde::{Deserialize, Serialize};
+use rkyv::{Archive, Deserialize, Serialize};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::unix::ReadHalf as UnixReadHalf;
@@ -22,7 +22,7 @@ use crate::pam::{PamError, ERR_RECV_FROM_SERVER, ERR_SEND_TO_SERVER};
 use crate::pamserver::{PamResponse, PamServer};
 
 // Request to be sent to the server process.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize)]
 pub(crate) struct PamRequest {
     pub id:      u64,
     pub user:    String,
@@ -201,7 +201,7 @@ impl PamAuthTask {
 
             // serialize data and send.
             let mut data: Vec<u8> = match crate::wire::serialize(&req) {
-                Ok(data) => data,
+                Ok(data) => data.into_vec(),
                 Err(e) => {
                     // this panic can never happen at runtime.
                     panic!("PamClient: serializing data: {:?}", e);

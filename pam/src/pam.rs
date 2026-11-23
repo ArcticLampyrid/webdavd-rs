@@ -3,7 +3,7 @@ use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_void};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use serde::{Deserialize, Serialize};
+use rkyv::{Archive, Deserialize, Serialize};
 
 extern "C" {
     fn c_pam_auth(
@@ -27,7 +27,7 @@ pub(crate) static TEST_MODE: AtomicUsize = AtomicUsize::new(0);
 ///
 /// It's best not to try to interpret this, and handle all errors
 /// as "authentication failed".
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize)]
 pub struct PamError(pub(crate) i32);
 
 impl PamError {
