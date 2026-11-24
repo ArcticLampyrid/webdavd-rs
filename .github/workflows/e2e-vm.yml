@@ -1,0 +1,96 @@
+name: E2E (VM)
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  e2e:
+    name: E2E (${{ matrix.profile }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # `binary` is the built webdavd, `binary_arg` the harness argument
+          # that a case of this guest declares, and `case_filter` the case
+          # names that this job runs.
+          - profile: debian-13
+            guest: debian
+            binary: target/release/webdavd
+            binary_arg: LINUX_WEBDAVD_PATH
+            case_filter: linux-
+            build: cargo build --release --locked
+          - profile: freebsd-14
+            guest: freebsd
+            binary: target/x86_64-unknown-freebsd/release/webdavd
+            binary_arg: FREEBSD_WEBDAVD_PATH
+            case_filter: freebsd-
+            # The FreeBSD guest does not use PAM, and NFS quota is Linux-only.
+            build: >-
+              cross build --release --locked --target x86_64-unknown-freebsd
+              --no-default-features --features quota
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Install PAM headers
+        if: matrix.guest == 'debian'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libpam0g-dev
+
+      - name: Install cross
+        if: matrix.guest == 'freebsd'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      - name: Set up Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.profile }}
+          workspaces: |
+            . -> target
+            e2e-harness -> target
+
+      - name: Build webdavd
+        run: ${{ matrix.build }}
+
+      - name: Stage webdavd for the guest
+        run: |
+          set -euo pipefail
+          workspace="$RUNNER_TEMP/workspace"
+          mkdir -p "$workspace/${{ matrix.guest }}"
+          cp "${{ matrix.binary }}" "$workspace/${{ matrix.guest }}/webdavd"
+          echo "WORKSPACE_DIR=$workspace" >> "$GITHUB_ENV"
+
+      - name: Build the test harness
+        run: cargo build --manifest-path e2e-harness/Cargo.toml --release --locked
+
+      - name: Run E2E cases
+        run: |
+          set -euo pipefail
+          e2e-harness/target/release/e2e-harness \
+            --workspace "$WORKSPACE_DIR" \
+            --arg "${{ matrix.binary_arg }}=${{ matrix.guest }}/webdavd" \
+            "${{ matrix.case_filter }}"
