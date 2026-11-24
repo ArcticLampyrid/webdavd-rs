@@ -20,6 +20,8 @@ categories = ["filesystem"]
 
 [workspace]
 members = [ "pam" ]
+# The VM tests have their own lock file and dependencies.
+exclude = [ "e2e-harness" ]
 
 [features]
 # By default, the "pam", "quota", and "quota-nfs" features are enabled.
