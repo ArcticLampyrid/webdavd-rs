@@ -1,0 +1,47 @@
+# ZFS dataset quota: statvfs of a ZFS dataset reports the dataset quota, and
+# ZFS stops writes at approximately the quota.
+# Per-request uid switching is Linux-only. Thus webdavd runs as alice (uid
+# 2000, see assets/webdavd.toml) without authentication.
+# The dataset and its quota must agree with assets/test.py.
+vm-profile: freebsd-14
+
+# FREEBSD_WEBDAVD_PATH: path of the FreeBSD webdavd binary in the workspace.
+args: [FREEBSD_WEBDAVD_PATH]
+
+steps:
+  - name: add account
+    type: script
+    run: |
+      set -eux
+      pw groupadd alice -g 2000
+      pw useradd alice -u 2000 -g alice -m -s /bin/sh
+
+  - name: create ZFS dataset with quota
+    type: script
+    run: |
+      set -eux
+      zfs create -p -o quota=10M -o mountpoint=/srv/webdav/zfs zroot/webdav-zfs
+      chown alice:alice /srv/webdav/zfs
+
+  - name: start webdavd
+    type: script
+    run: |
+      set -eux
+      curl -fsS -o /usr/local/bin/webdavd "$WORKSPACE_BASE_URL/$FREEBSD_WEBDAVD_PATH"
+      chmod 0755 /usr/local/bin/webdavd
+      curl -fsS -o /usr/local/etc/webdavd.toml "$ASSETS_BASE_URL/webdavd.toml"
+      daemon -o /dev/console /usr/local/bin/webdavd -c /usr/local/etc/webdavd.toml
+      # Any HTTP status: webdavd is ready.
+      for _ in $(seq 30); do
+          curl -s -o /dev/null http://127.0.0.1:8080/ && exit 0
+          sleep 1
+      done
+      exit 1
+
+  - name: check quota
+    type: script
+    run: |
+      set -eux
+      curl -fsS -o test.py "$ASSETS_BASE_URL/test.py"
+      chmod 0755 test.py
+      ./test.py

@@ -1,0 +1,95 @@
+# NFS rquota: /nfs is the ext4 filesystem over NFS, so the user quota comes
+# from rpc.rquotad. alice has a 4 MiB soft and 8 MiB hard limit; bob has no
+# limit and sees the filesystem space.
+# The accounts and limits must agree with assets/test.py.
+vm-profile: debian-13
+
+# /dev/vdb: ext4 with the quota feature, exported over NFS.
+disks: [128M]
+
+# LINUX_WEBDAVD_PATH: path of the webdavd binary in the workspace. It must run
+# with the glibc of Debian 13.
+args: [LINUX_WEBDAVD_PATH]
+
+steps:
+  - name: install packages
+    type: script
+    run: |
+      set -eux
+      apt-get update -q
+      DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends \
+          nfs-kernel-server quota rpcbind
+
+  - name: add accounts
+    type: script
+    run: |
+      set -eux
+      useradd --create-home --shell /bin/sh alice
+      useradd --create-home --shell /bin/sh bob
+      printf '%s\n' alice:alice-e2e-pw bob:bob-e2e-pw | chpasswd
+      printf '%s\n' 'auth    required pam_unix.so' 'account required pam_unix.so' >/etc/pam.d/webdavd
+
+  - name: set up ext4 with user quota and export it over NFS
+    type: script
+    run: |
+      set -eux
+      mkfs.ext4 -q -O quota -E quotatype=usrquota /dev/vdb
+      mkdir -p /srv/webdav/ext4
+      # The quota tools of rpc.rquotad find the quota file through the fstab entry.
+      echo '/dev/vdb /srv/webdav/ext4 ext4 rw,usrquota 0 0' >>/etc/fstab
+      mount -o usrquota /dev/vdb /srv/webdav/ext4
+      # Writable for all users, like /tmp.
+      chmod 1777 /srv/webdav/ext4
+      setquota -u alice 4096 8192 0 0 /srv/webdav/ext4
+
+      mkdir -p /etc/nfs.conf.d
+      printf '[nfsd]\ngrace-time=10\nlease-time=10\n' >/etc/nfs.conf.d/e2e.conf
+      echo '/srv/webdav/ext4 127.0.0.1(rw,sync,no_subtree_check)' >/etc/exports
+      systemctl enable rpcbind nfs-server quotarpc
+      systemctl restart rpcbind nfs-server quotarpc
+      mkdir -p /srv/webdav/nfs
+      mounted=
+      for _ in $(seq 30); do
+          if mount -t nfs '127.0.0.1:/srv/webdav/ext4' /srv/webdav/nfs; then
+              mounted=1
+              break
+          fi
+          sleep 1
+      done
+      test -n "$mounted"
+      # NFSv4 refuses to create files during its grace period after a start.
+      ready=
+      for _ in $(seq 30); do
+          if touch /srv/webdav/nfs/.ready; then
+              rm /srv/webdav/nfs/.ready
+              ready=1
+              break
+          fi
+          sleep 1
+      done
+      test -n "$ready"
+
+  - name: start webdavd
+    type: script
+    run: |
+      set -eux
+      curl -fsS -o /usr/local/bin/webdavd "$WORKSPACE_BASE_URL/$LINUX_WEBDAVD_PATH"
+      chmod 0755 /usr/local/bin/webdavd
+      curl -fsS -o /etc/webdavd.toml "$ASSETS_BASE_URL/webdavd.toml"
+      systemd-run --unit=webdavd --setenv=RUST_LOG=webdavd=info \
+          --property=StandardOutput=journal+console \
+          /usr/local/bin/webdavd -c /etc/webdavd.toml
+      # Any HTTP status: webdavd is ready.
+      for _ in $(seq 30); do
+          curl -s -o /dev/null http://127.0.0.1:8080/ && exit 0
+          sleep 1
+      done
+      exit 1
+
+  - name: check rquota
+    type: script
+    run: |
+      set -eux
+      curl -fsS -o test.py "$ASSETS_BASE_URL/test.py"
+      chmod 0755 test.py
+      ./test.py

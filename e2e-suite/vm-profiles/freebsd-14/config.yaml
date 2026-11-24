@@ -1,0 +1,28 @@
+# FreeBSD 14.5 with a ZFS root pool ("zroot"). The cloud image has nuageinit,
+# which writes the files below before the network starts, and starts the
+# runner at the end of the boot (rc.d "local"). The serial port is a console
+# of the loader configuration, thus /dev/console.
+#
+# After the steps: curl, Python 3, and uv. uv has no Python builds for
+# FreeBSD, so scripts use the Python 3 package.
+image:
+  url: https://download.freebsd.org/releases/VM-IMAGES/14.5-RELEASE/amd64/Latest/FreeBSD-14.5-RELEASE-amd64-BASIC-CLOUDINIT-zfs.qcow2.xz
+
+write-files:
+  # The first-boot scripts read these files after the network starts.
+  # freebsd-update would install updates and reboot the guest.
+  - path: /etc/rc.conf.d/firstboot_freebsd_update
+    content: |
+      firstboot_freebsd_update_enable="NO"
+  - path: /etc/rc.conf.d/firstboot_pkgs
+    content: |
+      firstboot_pkgs_enable="NO"
+
+steps:
+  - name: install curl, Python and uv
+    type: script
+    run: |
+      set -eux
+      export ASSUME_ALWAYS_YES=yes
+      pkg install -y curl python3 uv
+      uv --version

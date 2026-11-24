@@ -1,0 +1,27 @@
+# webdavd configuration of the case linux-tmpfs-statvfs.
+
+[server]
+listen = "127.0.0.1:8080"
+# nobody/nogroup when not switched to the authenticated user.
+uid = 65534
+gid = 65534
+
+[accounts]
+auth-type = "pam"
+acct-type = "unix"
+
+[pam]
+service = "webdavd"
+cache-timeout = 0
+
+[unix]
+min-uid = 1000
+supplementary-groups = true
+
+[[location]]
+route = [ "/tmpfs(/*path)" ]
+methods = [ "webdav-rw" ]
+auth = "true"
+handler = "filesystem"
+setuid = true
+directory = "/srv/webdav/tmpfs"

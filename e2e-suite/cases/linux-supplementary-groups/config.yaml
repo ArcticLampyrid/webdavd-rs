@@ -1,0 +1,48 @@
+# Supplementary groups: alice is in sharedgrp, bob is not. Only members of
+# sharedgrp can read and write /groups/secret, a root:sharedgrp directory with
+# mode 0770.
+# The accounts and the directory must agree with assets/test.py.
+vm-profile: debian-13
+
+# LINUX_WEBDAVD_PATH: path of the webdavd binary in the workspace. It must run
+# with the glibc of Debian 13.
+args: [LINUX_WEBDAVD_PATH]
+
+steps:
+  - name: add accounts and shared directory
+    type: script
+    run: |
+      set -eux
+      groupadd sharedgrp
+      useradd --create-home --shell /bin/sh --groups sharedgrp alice
+      useradd --create-home --shell /bin/sh bob
+      printf '%s\n' alice:alice-e2e-pw bob:bob-e2e-pw | chpasswd
+      printf '%s\n' 'auth    required pam_unix.so' 'account required pam_unix.so' >/etc/pam.d/webdavd
+      mkdir -p /srv/webdav/groups/secret
+      chown root:sharedgrp /srv/webdav/groups/secret
+      chmod 0770 /srv/webdav/groups/secret
+
+  - name: start webdavd
+    type: script
+    run: |
+      set -eux
+      curl -fsS -o /usr/local/bin/webdavd "$WORKSPACE_BASE_URL/$LINUX_WEBDAVD_PATH"
+      chmod 0755 /usr/local/bin/webdavd
+      curl -fsS -o /etc/webdavd.toml "$ASSETS_BASE_URL/webdavd.toml"
+      systemd-run --unit=webdavd --setenv=RUST_LOG=webdavd=info \
+          --property=StandardOutput=journal+console \
+          /usr/local/bin/webdavd -c /etc/webdavd.toml
+      # Any HTTP status: webdavd is ready.
+      for _ in $(seq 30); do
+          curl -s -o /dev/null http://127.0.0.1:8080/ && exit 0
+          sleep 1
+      done
+      exit 1
+
+  - name: check supplementary groups
+    type: script
+    run: |
+      set -eux
+      curl -fsS -o test.py "$ASSETS_BASE_URL/test.py"
+      chmod 0755 test.py
+      ./test.py

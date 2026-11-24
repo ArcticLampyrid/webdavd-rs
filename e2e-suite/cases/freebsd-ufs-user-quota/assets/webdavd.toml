@@ -1,0 +1,17 @@
+# webdavd configuration of the case freebsd-ufs-user-quota.
+#
+# Per-request uid switching (setuid) is Linux-only. Thus the server runs as
+# alice, and quota lookups use statvfs.
+
+[server]
+listen = "127.0.0.1:8080"
+# alice
+uid = 2000
+gid = 2000
+
+[[location]]
+route = [ "/ufs(/*path)" ]
+methods = [ "webdav-rw" ]
+auth = "false"
+handler = "filesystem"
+directory = "/srv/webdav/ufs"

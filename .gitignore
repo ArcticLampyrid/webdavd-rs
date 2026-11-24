@@ -13,3 +13,5 @@ debian/*.log
 debian/files
 debian/*/
 !*/debian/source
+__pycache__/
+*.pyc

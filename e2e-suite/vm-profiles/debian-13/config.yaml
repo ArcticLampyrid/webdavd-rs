@@ -1,0 +1,39 @@
+# Debian 13 (trixie). The "generic" cloud image has cloud-init and the full
+# kernel (the "nocloud" image has no cloud-init). The serial port is the last
+# console= of the kernel command line, thus /dev/console.
+#
+# After the steps: curl, and uv in /usr/local/bin, with the Python 3 of Debian.
+image:
+  url: https://cloud.debian.org/images/cloud/trixie/latest/debian-13-generic-amd64.qcow2
+
+write-files:
+  # cloud-init writes this file before the APT timers can start. The periodic
+  # APT jobs (apt-daily, unattended-upgrades) lock the package database.
+  - path: /etc/apt/apt.conf.d/99webdavd-e2e
+    content: |
+      APT::Periodic::Enable "0";
+      DPkg::Lock::Timeout "300";
+
+steps:
+  - name: disable automatic updates
+    type: script
+    run: |
+      set -eux
+      systemctl disable --now apt-daily.timer apt-daily-upgrade.timer
+      systemctl stop apt-daily.service apt-daily-upgrade.service
+      if systemctl cat unattended-upgrades.service >/dev/null 2>&1; then
+          systemctl disable --now unattended-upgrades.service
+      fi
+
+  - name: install curl and uv
+    type: script
+    run: |
+      set -eux
+      apt-get update -q
+      DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends ca-certificates curl
+      # To a file, so that a retry restarts cleanly. A stalled transfer counts as failed.
+      curl -fsSL --retry 5 --retry-all-errors --speed-limit 1024 --speed-time 30 -o /tmp/uv.tar.gz \
+          https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-unknown-linux-gnu.tar.gz
+      tar -xzf /tmp/uv.tar.gz --strip-components=1 -C /usr/local/bin
+      rm /tmp/uv.tar.gz
+      uv --version
