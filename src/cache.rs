@@ -12,11 +12,15 @@ pub struct Cache<K, V> {
     intern: Mutex<Intern<K, V>>,
 }
 
+/// The fifo has the newest entry at the front. A key that is inserted again
+/// has a stale entry in the fifo; the sequence number makes sure that the
+/// expiry of the stale entry does not remove the live value from the map.
 struct Intern<K, V> {
     maxsize: usize,
     maxage:  Duration,
-    map:     HashMap<K, Arc<V>>,
-    fifo:    VecDeque<(Instant, K)>,
+    nextseq: u64,
+    map:     HashMap<K, (u64, Arc<V>)>,
+    fifo:    VecDeque<(Instant, u64, K)>,
 }
 
 impl<K: Hash + Eq + Clone, V> Cache<K, V> {
@@ -24,6 +28,7 @@ impl<K: Hash + Eq + Clone, V> Cache<K, V> {
         let i = Intern {
             maxsize: 0,
             maxage:  Duration::new(0, 0),
+            nextseq: 0,
             map:     HashMap::new(),
             fifo:    VecDeque::new(),
         };
@@ -44,36 +49,33 @@ impl<K: Hash + Eq + Clone, V> Cache<K, V> {
         self
     }
 
-    fn expire(&self, m: &mut Intern<K, V>) {
+    fn expire(m: &mut Intern<K, V>) {
         let mut n = m.fifo.len();
-        if m.maxsize > 0 && n >= m.maxsize {
+        if m.maxsize > 0 && n > m.maxsize {
             n = m.maxsize;
         }
-        if m.maxage.as_secs() > 0 || m.maxage.subsec_nanos() > 0 {
+        if !m.maxage.is_zero() {
             let now = Instant::now();
-            while n > 0 {
-                let &(t, _) = m.fifo.get(n - 1).unwrap();
-                if now.duration_since(t) <= m.maxage {
-                    break;
-                }
+            while n > 0 && now.duration_since(m.fifo[n - 1].0) > m.maxage {
                 n -= 1;
             }
         }
-        for x in n..m.fifo.len() {
-            let (_, key) = m.fifo.get(x).unwrap();
-            m.map.remove(key);
+        for (_, seq, key) in m.fifo.drain(n..) {
+            if m.map.get(&key).is_some_and(|(live, _)| *live == seq) {
+                m.map.remove(&key);
+            }
         }
-        m.fifo.truncate(n);
     }
 
     pub fn insert(&self, key: K, val: V) -> Arc<V> {
         let mut m = self.intern.lock().unwrap();
-        self.expire(&mut *m);
+        let seq = m.nextseq;
+        m.nextseq += 1;
         let av = Arc::new(val);
-        let ac = av.clone();
-        m.map.insert(key.clone(), av);
-        m.fifo.push_front((Instant::now(), key));
-        ac
+        m.map.insert(key.clone(), (seq, av.clone()));
+        m.fifo.push_front((Instant::now(), seq, key));
+        Self::expire(&mut m);
+        av
     }
 
     // see https://doc.rust-lang.org/book/first-edition/borrow-and-asref.html
@@ -83,11 +85,8 @@ impl<K: Hash + Eq + Clone, V> Cache<K, V> {
         Q: Hash + Eq + ?Sized,
     {
         let mut m = self.intern.lock().unwrap();
-        self.expire(&mut *m);
-        if let Some(v) = m.map.get(key) {
-            return Some(v.clone());
-        }
-        None
+        Self::expire(&mut m);
+        m.map.get(key).map(|(_, v)| v.clone())
     }
 }
 
@@ -187,5 +186,63 @@ pub(crate) mod cached {
             Err(e) => Err(e),
             Ok(pwd) => Ok(PWCACHE.insert(username.to_owned(), pwd)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::thread::sleep;
+
+    use super::*;
+
+    #[test]
+    fn insert_and_get() {
+        let cache = Cache::new();
+        assert_eq!(*cache.insert("a", 1), 1);
+        assert_eq!(cache.get("a").as_deref(), Some(&1));
+        assert_eq!(cache.get("b"), None);
+    }
+
+    #[test]
+    fn maxsize_evicts_oldest() {
+        let cache = Cache::new().maxsize(2);
+        cache.insert("a", 1);
+        cache.insert("b", 2);
+        cache.insert("c", 3);
+        assert_eq!(cache.get("a"), None);
+        assert_eq!(cache.get("b").as_deref(), Some(&2));
+        assert_eq!(cache.get("c").as_deref(), Some(&3));
+    }
+
+    #[test]
+    fn maxsize_keeps_reinserted_key() {
+        let cache = Cache::new().maxsize(2);
+        cache.insert("a", 1);
+        cache.insert("a", 2);
+        // Evicts the stale fifo entry of "a", but not the live value.
+        cache.insert("b", 3);
+        assert_eq!(cache.get("a").as_deref(), Some(&2));
+        assert_eq!(cache.get("b").as_deref(), Some(&3));
+    }
+
+    #[test]
+    fn maxage_expires() {
+        let cache = Cache::new().maxage(Duration::from_millis(50));
+        cache.insert("a", 1);
+        sleep(Duration::from_millis(80));
+        assert_eq!(cache.get("a"), None);
+    }
+
+    #[test]
+    fn maxage_keeps_reinserted_key() {
+        let cache = Cache::new().maxage(Duration::from_millis(300));
+        cache.insert("a", 1);
+        sleep(Duration::from_millis(200));
+        cache.insert("a", 2);
+        sleep(Duration::from_millis(200));
+        // The first entry is expired, the second one is not.
+        assert_eq!(cache.get("a").as_deref(), Some(&2));
+        sleep(Duration::from_millis(200));
+        assert_eq!(cache.get("a"), None);
     }
 }
