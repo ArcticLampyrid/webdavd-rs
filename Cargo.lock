@@ -420,15 +420,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fs-quota"
-version = "0.1.0"
-dependencies = [
- "cc",
- "libc",
- "log",
-]
-
-[[package]]
 name = "futures"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1038,6 +1029,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "onc-rpc"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73309441c26e2195ee11505bb3f92bb0f2256b6b62097050ecbe63fcebd93e42"
+dependencies = [
+ "byteorder",
+ "thiserror",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1570,6 +1571,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "thiserror"
+version = "2.0.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09e52cb86a36cede5cb101bf8908837b3e4c6e5e59fe7fd85c23fb56200d189e"
+dependencies = [
+ "thiserror-impl",
+]
+
+[[package]]
+name = "thiserror-impl"
+version = "2.0.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fe5197923287db20a58125f0bc85c062f7f2c892de97b18c356f9efb14b28524"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.10",
+]
+
+[[package]]
 name = "threadpool"
 version = "1.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1836,7 +1857,6 @@ dependencies = [
  "clap",
  "dav-server",
  "env_logger",
- "fs-quota",
  "futures",
  "headers",
  "http",
@@ -1846,6 +1866,7 @@ dependencies = [
  "lazy_static",
  "libc",
  "log",
+ "onc-rpc",
  "pam-sandboxed",
  "pwhash",
  "regex",

@@ -19,28 +19,29 @@ license = "Apache-2.0"
 categories = ["filesystem"]
 
 [workspace]
-members = [ "fs_quota", "pam" ]
+members = [ "pam" ]
 
 [features]
-# By default, the "pam" and "quota" features are enabled.
+# By default, the "pam", "quota", and "quota-nfs" features are enabled.
 #
 # Some systems do not have pam (like OpenBSD), so to compile this
 # package without pam but with quota use:
 #
 #     cargo build --release --no-default-features --features=quota
 #
-default = [ "pam", "quota" ]
+default = [ "pam", "quota", "quota-nfs" ]
 
-# dependencies for the feature.
-pam = [ "pam-sandboxed" ]
-quota = [ "fs-quota" ]
+pam = [ "dep:pam-sandboxed" ]
+# Disk space (statvfs) and local user quota (Linux, FreeBSD) reporting.
+quota = []
+# Also query user quota on NFS mounts through the rquota RPC service.
+quota-nfs = [ "quota", "dep:onc-rpc" ]
 
 [dependencies]
 bytes = "1.12"
 clap = { version = "4.6.9", features = [ "cargo" ] }
 dav-server = { version = "0.12.0", default-features = false, features = [ "localfs", "proppatch" ] }
 env_logger = "0.11.12"
-fs-quota = { path = "fs_quota", version = "0.1.0", optional = true }
 futures = "0.3.34"
 headers = "0.4.2"
 http = "1.5"
@@ -50,6 +51,7 @@ hyper-util = { version = "0.1.21", features = [ "tokio", "server", "server-auto"
 lazy_static = "1.5.1"
 libc = "0.2.191"
 log = "0.4.35"
+onc-rpc = { version = "0.3.3", default-features = false, optional = true }
 pam-sandboxed = { path = "pam", version = "0.2.0", optional = true }
 pwhash = "1.0.0"
 regex = "1.13"

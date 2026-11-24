@@ -15,8 +15,9 @@ pub struct UserFs {
     // basedir and uid are only used for quota lookups.
     #[cfg_attr(not(feature = "quota"), allow(dead_code))]
     basedir: PathBuf,
+    /// Target user, `None` when the server does not switch uid.
     #[cfg_attr(not(feature = "quota"), allow(dead_code))]
-    uid:     u32,
+    uid:     Option<u32>,
 }
 
 impl UserFs {
@@ -29,7 +30,7 @@ impl UserFs {
     ) -> Box<UserFs>
     {
         // uid is used for quota() calls.
-        let uid = target_creds.as_ref().map(|ugid| ugid.0).unwrap_or(0);
+        let uid = target_creds.as_ref().map(|ugid| ugid.0);
 
         // set up the LocalFs hooks for uid switching.
         let switch = UgidSwitch::new(target_creds);
@@ -47,6 +48,51 @@ impl UserFs {
             ),
             uid,
         })
+    }
+
+    /// Get `(bytes used, bytes limit)` that applies to `path` for the user of this filesystem.
+    #[cfg(feature = "quota")]
+    pub fn get_quota_for_path(&self, path: &Path) -> FsFuture<'_, (u64, Option<u64>)> {
+        use std::os::unix::fs::MetadataExt;
+        use std::time::Duration;
+
+        use dav_server::fs::FsError;
+        use futures::future::FutureExt;
+
+        use crate::cache::Cache;
+        use crate::quota::{self, QuotaInfo};
+
+        lazy_static::lazy_static! {
+            // Keyed by (st_dev, uid): all paths on one filesystem share one entry.
+            static ref QCACHE: Cache<(u64, Option<u32>), QuotaInfo> =
+                Cache::new().maxage(Duration::from_secs(30));
+        }
+
+        let path = path.to_path_buf();
+        let uid = self.uid;
+        async move {
+            // Runs with the credentials of the user, like all other filesystem access.
+            let info = self
+                .fs
+                .blocking(move || -> Result<QuotaInfo, FsError> {
+                    let key = std::fs::metadata(&path).ok().map(|meta| (meta.dev(), uid));
+                    if let Some(info) = key.and_then(|key| QCACHE.get(&key)) {
+                        debug!("get_quota for {:?}: from cache", path);
+                        return Ok(*info);
+                    }
+                    let info = quota::check_path(&path, uid).map_err(|err| {
+                        error!("get_quota for {:?}: {}", path, err);
+                        FsError::GeneralFailure
+                    })?;
+                    if let Some(key) = key {
+                        QCACHE.insert(key, info);
+                    }
+                    Ok(info)
+                })
+                .await?;
+            Ok((info.bytes_used, info.bytes_limit))
+        }
+        .boxed()
     }
 }
 
@@ -94,39 +140,9 @@ impl DavFileSystem for UserFs {
 
     #[cfg(feature = "quota")]
     fn get_quota(&self) -> FsFuture<'_, (u64, Option<u64>)> {
-        use crate::cache;
-        use dav_server::fs::FsError;
-        use fs_quota::*;
-        use futures::future::FutureExt;
-        use std::time::Duration;
-
-        lazy_static::lazy_static! {
-            static ref QCACHE: cache::Cache<PathBuf, FsQuota> = cache::Cache::new().maxage(Duration::new(30, 0));
-        }
-
-        async move {
-            let mut key = self.basedir.clone();
-            key.push(self.uid.to_string());
-            let r = match QCACHE.get(&key) {
-                Some(r) => {
-                    debug!("get_quota for {:?}: from cache", key);
-                    r
-                },
-                None => {
-                    let path = self.basedir.clone();
-                    let uid = self.uid;
-                    let r = self
-                        .fs
-                        .blocking(move || {
-                            FsQuota::check(&path, Some(uid)).map_err(|_| FsError::GeneralFailure)
-                        })
-                        .await?;
-                    debug!("get_quota for {:?}: insert to cache", key);
-                    QCACHE.insert(key, r)
-                },
-            };
-            Ok((r.bytes_used, r.bytes_limit))
-        }
-        .boxed()
+        // TODO: `DavFileSystem::get_quota` in dav-server 0.12 has no path parameter, so
+        // query `self.basedir`. Pass the target path to `get_quota_for_path` once
+        // upstream supports path-level quota.
+        self.get_quota_for_path(&self.basedir)
     }
 }

@@ -17,6 +17,8 @@ extern crate log;
 mod auth;
 mod cache;
 mod config;
+#[cfg(feature = "quota")]
+mod quota;
 mod rootfs;
 #[doc(hidden)]
 pub mod router;
