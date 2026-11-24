@@ -27,9 +27,7 @@ jobs:
         run: |
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            libpam0g-dev \
-            libtirpc-dev \
-            rpcsvc-proto
+            libpam0g-dev
 
       - name: Checkout
         uses: actions/checkout@v7
@@ -37,8 +35,17 @@ jobs:
       - name: Set up Rust cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Run tests
+      - name: Run tests (default features)
         run: cargo test --workspace --locked
+
+      - name: Run tests (no default features)
+        run: cargo test --locked --no-default-features
+
+      - name: Run tests (quota only)
+        run: cargo test --locked --no-default-features --features quota
+
+      - name: Run tests (all features)
+        run: cargo test --workspace --locked --all-features
 
       - name: Build release binary
         run: cargo build --release --locked
