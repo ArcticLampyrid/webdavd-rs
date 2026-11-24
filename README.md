@@ -20,7 +20,8 @@ Building this crate requires a modern Rust toolchain.
 ## Features.
 
 - RFC4918: webdav, full support
-- RFC4331: webdav quota support (linux quota, NFS quota, statfs)
+- RFC4331: webdav quota support (filesystem free space, Linux and FreeBSD
+  user quota, optional NFS user quota)
 - locking support (fake locking, enough for macOS and Windows clients)
 - can be case insensitive for Windows clients
 - files starting with a dot get the HIDDEN attribute on windows
@@ -40,6 +41,12 @@ For example, to build on OpenBSD, which does not have pam:
 ```
 cargo build --release --no-default-features --features=quota
 ```
+
+Cargo features:
+
+- **pam**: PAM authentication (default).
+- **quota**: report free disk space and user quota to clients (default).
+- **quota-nfs**: also get user quota from NFS servers (`rpc.rquotad`) (default).
 
 ## Configuration.
 
