@@ -151,31 +151,6 @@ impl Server {
         Ok(user)
     }
 
-    // return a new response::Builder with the Server and CORS header set.
-    fn response_builder(&self) -> http::response::Builder {
-        let mut builder = http::Response::builder();
-        self.set_headers(builder.headers_mut().unwrap());
-        builder
-    }
-
-    // Set Server: webdavd-rs header, and CORS.
-    fn set_headers(&self, headers: &mut http::HeaderMap<http::header::HeaderValue>) {
-        let id = self
-            .config
-            .server
-            .identification
-            .as_deref()
-            .unwrap_or("webdavd-rs");
-        if !id.is_empty() {
-            headers.insert("server", id.parse().unwrap());
-        }
-        if self.config.server.cors {
-            headers.insert("Access-Control-Allow-Origin", "*".parse().unwrap());
-            headers.insert("Access-Control-Allow-Methods", "GET,HEAD,OPTIONS,PROPFIND".parse().unwrap());
-            headers.insert("Access-Control-Allow-Headers", "DNT,Depth,Range".parse().unwrap());
-        }
-    }
-
     // handle a request.
     async fn route(&self, req: HttpRequest, remote_ip: SocketAddr) -> HttpResult {
         // Get the URI path.
@@ -191,17 +166,14 @@ impl Server {
             Err(_) => return self.error(http::StatusCode::METHOD_NOT_ALLOWED).await,
         };
 
+        // Match routes to one or more locations.
+        let matched = self.config.router.matches(path, method, &["user", "path"]);
+
         // Request is stored here.
         let mut reqdata = Some(req);
         let mut got_match = false;
 
-        // Match routes to one or more locations.
-        for route in self
-            .config
-            .router
-            .matches(path, method, &["user", "path"])
-            .drain(..)
-        {
+        for route in matched.routes {
             got_match = true;
 
             // Take the request from the option.
@@ -224,11 +196,20 @@ impl Server {
             }
         }
 
-        if !got_match {
-            debug!("route: no matching route for {:?}", davpath);
+        match (got_match, matched.allowed) {
+            // A location matched the path, but none allows the request method.
+            (false, Some(allowed)) => {
+                debug!("route: method {:?} not allowed for {:?}", method, davpath);
+                Ok(no_route_response(&self.config.server, Some(allowed)))
+            },
+            // No location matched the path at all.
+            (false, None) => {
+                debug!("route: no matching route for {:?}", davpath);
+                self.error(StatusCode::NOT_FOUND).await
+            },
+            // Every matching location answered "not found" (on_notfound).
+            (true, _) => self.error(StatusCode::NOT_FOUND).await,
         }
-
-        self.error(StatusCode::NOT_FOUND).await
     }
 
     // handle a request.
@@ -367,13 +348,7 @@ impl Server {
     }
 
     async fn build_error(&self, code: StatusCode, location: Option<&Location>) -> HttpResult {
-        let msg = format!(
-            "<error>{} {}</error>\n",
-            code.as_u16(),
-            code.canonical_reason().unwrap_or("")
-        );
-        let mut response = self
-            .response_builder()
+        let mut response = response_builder(&self.config.server)
             .status(code)
             .header("Content-Type", "text/xml");
         if code == StatusCode::UNAUTHORIZED {
@@ -382,7 +357,7 @@ impl Server {
             let realm = realm.map(|s| s.as_str()).unwrap_or("Webdav Server");
             response = response.header("WWW-Authenticate", format!("Basic realm=\"{}\"", realm).as_str());
         }
-        Ok(response.body(msg.into()).unwrap())
+        Ok(response.body(error_body(code).into()).unwrap())
     }
 
     async fn auth_error(&self, code: StatusCode, location: &Location) -> HttpResult {
@@ -397,9 +372,65 @@ impl Server {
     async fn run_davhandler(&self, config: DavConfig, req: HttpRequest) -> HttpResult {
         let resp = self.dh.handle_with(config, req).await;
         let (mut parts, body) = resp.into_parts();
-        self.set_headers(&mut parts.headers);
+        set_headers(&self.config.server, &mut parts.headers);
         Ok(http::Response::from_parts(parts, body))
     }
+}
+
+// Return a new response::Builder with the Server and CORS header set.
+fn response_builder(srv: &config::Server) -> http::response::Builder {
+    let mut builder = http::Response::builder();
+    set_headers(srv, builder.headers_mut().unwrap());
+    builder
+}
+
+// Set Server: webdavd-rs header, and CORS.
+fn set_headers(srv: &config::Server, headers: &mut http::HeaderMap<http::header::HeaderValue>) {
+    let id = srv.identification.as_deref().unwrap_or("webdavd-rs");
+    if !id.is_empty() {
+        headers.insert("server", id.parse().unwrap());
+    }
+    if srv.cors {
+        headers.insert("Access-Control-Allow-Origin", "*".parse().unwrap());
+        headers.insert("Access-Control-Allow-Methods", "GET,HEAD,OPTIONS,PROPFIND".parse().unwrap());
+        headers.insert("Access-Control-Allow-Headers", "DNT,Depth,Range".parse().unwrap());
+    }
+}
+
+// The body of an error response.
+fn error_body(code: StatusCode) -> String {
+    format!(
+        "<error>{} {}</error>\n",
+        code.as_u16(),
+        code.canonical_reason().unwrap_or("")
+    )
+}
+
+// The response for a request that no location handled.
+//
+// If `allowed` is set, the path matched at least one location but none of them
+// allows the request method: that is "405 Method Not Allowed". RFC 9110,
+// section 15.5.6 requires an `Allow` header with the methods that the target
+// does support.
+//
+// If `allowed` is `None`, the path did not match any location: "404 Not Found".
+fn no_route_response(
+    srv: &config::Server,
+    allowed: Option<DavMethodSet>,
+) -> http::Response<dav_server::body::Body>
+{
+    let code = match allowed {
+        Some(_) => StatusCode::METHOD_NOT_ALLOWED,
+        None => StatusCode::NOT_FOUND,
+    };
+    let mut builder = response_builder(srv)
+        .status(code)
+        .header("Content-Type", "text/xml");
+    if let Some(allowed) = allowed {
+        let allow = router::methods(allowed).collect::<Vec<_>>().join(", ");
+        builder = builder.header("Allow", allow);
+    }
+    builder.body(error_body(code).into()).unwrap()
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -673,4 +704,84 @@ fn make_listener(srv: &config::Server, addr: SocketAddr) -> io::Result<TcpListen
     s.listen(128)?;
     let listener: std::net::TcpListener = s.into();
     TcpListener::from_std(listener)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Two locations on the same path: one read-only, one read-write.
+    const TEST_CONFIG: &str = r#"
+        [server]
+
+        [[location]]
+        route = [ "/files/*path" ]
+        methods = [ "webdav-ro" ]
+        handler = "filesystem"
+        directory = "/tmp"
+
+        [[location]]
+        route = [ "/files/*path" ]
+        methods = [ "http-rw" ]
+        handler = "filesystem"
+        directory = "/tmp"
+    "#;
+
+    // The union of the methods of both test locations.
+    const TEST_ALLOW: &str = "HEAD, GET, PUT, OPTIONS, PROPFIND";
+
+    fn test_config() -> config::Config {
+        let mut config: config::Config = toml::from_str(TEST_CONFIG).unwrap();
+        config::build_routes("test", &mut config).unwrap();
+        config
+    }
+
+    #[test]
+    fn unmatched_path_is_not_found() {
+        let config = test_config();
+        let router = &config.router;
+        let matched = router.matches(b"/other/x", DavMethod::Put, &["user", "path"]);
+        assert!(matched.routes.is_empty());
+        assert!(matched.allowed.is_none());
+
+        let res = no_route_response(&config.server, matched.allowed);
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        assert!(res.headers().get("allow").is_none());
+    }
+
+    #[test]
+    fn disallowed_method_is_405_with_allow() {
+        let config = test_config();
+        let router = &config.router;
+        // No test location allows DELETE.
+        let matched = router.matches(b"/files/a.txt", DavMethod::Delete, &["user", "path"]);
+        assert!(matched.routes.is_empty());
+        assert!(matched.allowed.is_some());
+
+        let res = no_route_response(&config.server, matched.allowed);
+        assert_eq!(res.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(res.headers()["allow"], TEST_ALLOW);
+    }
+
+    #[test]
+    fn allowed_method_routes_to_its_location() {
+        let config = test_config();
+        let router = &config.router;
+
+        // PROPFIND is only allowed by the read-only location.
+        let matched = router.matches(b"/files/a.txt", DavMethod::PropFind, &["user", "path"]);
+        assert_eq!(matched.routes.iter().map(|r| *r.data).collect::<Vec<_>>(), [0]);
+
+        // PUT is only allowed by the read-write location.
+        let matched = router.matches(b"/files/a.txt", DavMethod::Put, &["user", "path"]);
+        assert_eq!(matched.routes.iter().map(|r| *r.data).collect::<Vec<_>>(), [1]);
+
+        // GET is allowed by both; the first location wins.
+        let matched = router.matches(b"/files/a.txt", DavMethod::Get, &["user", "path"]);
+        assert_eq!(matched.routes.iter().map(|r| *r.data).collect::<Vec<_>>(), [0, 1]);
+
+        // The allowed methods are the union over all matching locations.
+        let allowed = router::methods(matched.allowed.unwrap()).collect::<Vec<_>>();
+        assert_eq!(allowed, TEST_ALLOW.split(", ").collect::<Vec<_>>());
+    }
 }

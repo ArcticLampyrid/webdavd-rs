@@ -8,6 +8,52 @@ use lazy_static::lazy_static;
 use regex::bytes::{Match, Regex, RegexSet};
 use dav_server::{DavMethod, DavMethodSet};
 
+/// Every method that a [`DavMethodSet`] can hold, with its HTTP name.
+///
+/// `dav-server` does not let us iterate a `DavMethodSet`, so the router keeps
+/// its own table. It is used for the `Allow` header of a "405 Method Not
+/// Allowed" response. `test_all_methods` checks that the table is complete.
+const METHODS: [(&str, DavMethod); 16] = [
+    ("HEAD", DavMethod::Head),
+    ("GET", DavMethod::Get),
+    ("PUT", DavMethod::Put),
+    ("PATCH", DavMethod::Patch),
+    ("OPTIONS", DavMethod::Options),
+    ("PROPFIND", DavMethod::PropFind),
+    ("PROPPATCH", DavMethod::PropPatch),
+    ("MKCOL", DavMethod::MkCol),
+    ("COPY", DavMethod::Copy),
+    ("MOVE", DavMethod::Move),
+    ("DELETE", DavMethod::Delete),
+    ("LOCK", DavMethod::Lock),
+    ("UNLOCK", DavMethod::Unlock),
+    ("REPORT", DavMethod::Report),
+    ("MKCALENDAR", DavMethod::MkCalendar),
+    ("MKADDRESSBOOK", DavMethod::MkAddressbook),
+];
+
+/// The HTTP names of the methods in `set`, in the order of [`METHODS`].
+pub fn methods(set: DavMethodSet) -> impl Iterator<Item = &'static str> {
+    METHODS
+        .iter()
+        .filter(move |(_, m)| set.contains(*m))
+        .map(|(name, _)| *name)
+}
+
+/// The union of two method sets.
+///
+/// Bits that do not correspond to a method in [`METHODS`] are dropped: they
+/// have no HTTP name, so they cannot be part of an `Allow` header.
+fn union(a: DavMethodSet, b: DavMethodSet) -> DavMethodSet {
+    let mut out = DavMethodSet::none();
+    for (_, m) in METHODS {
+        if a.contains(m) || b.contains(m) {
+            out.add(m);
+        }
+    }
+    out
+}
+
 // internal representation of a route.
 #[derive(Debug)]
 struct Route<T: Debug> {
@@ -22,6 +68,16 @@ pub struct MatchedRoute<'t, 'p, T: Debug> {
     pub methods: Option<DavMethodSet>,
     pub params:  Vec<Option<Param<'p>>>,
     pub data:    &'t T,
+}
+
+/// All matching routes for a path, and the methods allowed on that path.
+#[derive(Debug)]
+pub struct RouteMatch<'t, 'p, T: Debug> {
+    /// Routes whose path matched and whose methods allow the request method.
+    pub routes:  Vec<MatchedRoute<'t, 'p, T>>,
+    /// The union of the methods of every route whose path matched, or `None`
+    /// if no route's path matched at all.
+    pub allowed: Option<DavMethodSet>,
 }
 
 /// A parameter on a matched route.
@@ -192,30 +248,38 @@ impl<T: Debug> Router<T> {
         path: &'a [u8],
         method: DavMethod,
         param_names: &[&str],
-    ) -> Vec<MatchedRoute<'_, 'a, T>>
+    ) -> RouteMatch<'_, 'a, T>
     {
-        let mut matched = Vec::new();
+        let mut routes = Vec::new();
+        let mut allowed: Option<DavMethodSet> = None;
         for idx in self.set.matches(path) {
             let route = &self.routes[idx];
-            if route.methods.map(|m| m.contains(method)).unwrap_or(true) {
-                let mut params = Vec::new();
-                if let Some(caps) = route.regex.captures(path) {
-                    for name in param_names {
-                        params.push(caps.name(name).map(Param));
-                    }
-                } else {
-                    for _ in param_names {
-                        params.push(None);
-                    }
-                }
-                matched.push(MatchedRoute {
-                    methods: route.methods,
-                    params,
-                    data: &route.data,
-                });
+            // No methods set means: all methods are allowed.
+            let methods = route.methods.unwrap_or_else(DavMethodSet::all);
+            allowed = Some(allowed.map_or(methods, |a| union(a, methods)));
+
+            // Not for this request method, but the path is known.
+            if !methods.contains(method) {
+                continue;
             }
+
+            let mut params = Vec::new();
+            if let Some(caps) = route.regex.captures(path) {
+                for name in param_names {
+                    params.push(caps.name(name).map(Param));
+                }
+            } else {
+                for _ in param_names {
+                    params.push(None);
+                }
+            }
+            routes.push(MatchedRoute {
+                methods: route.methods,
+                params,
+                data: &route.data,
+            });
         }
-        matched
+        RouteMatch { routes, allowed }
     }
 }
 
@@ -226,8 +290,8 @@ mod tests {
 
     fn test_match(rtr: &Router<usize>, p: &[u8], user: &str, path: &str) {
         let x = rtr.matches(p, DavMethod::Get, &["user", "path"]);
-        assert!(!x.is_empty());
-        let x = &x[0];
+        assert!(!x.routes.is_empty());
+        let x = &x.routes[0];
         if !user.is_empty() {
             assert!(x.params[0]
                 .as_ref()
@@ -257,6 +321,56 @@ mod tests {
         test_match(&rtr, b"/users/mike", "mike", "");
         test_match(&rtr, b"/files/foo/bar", "", "foo/bar");
         test_match(&rtr, b"/files", "", "");
+        Ok(())
+    }
+
+    /// The method table must map every method to its own HTTP name.
+    #[test]
+    fn test_all_methods() {
+        let mut bits = 0;
+        for (name, method) in METHODS {
+            // The name must select exactly that method.
+            let set = DavMethodSet::from_vec(vec![name]).unwrap();
+            assert!(set.contains(method));
+            assert_eq!(methods(set).collect::<Vec<_>>(), [name]);
+            bits |= method as u32;
+        }
+        // `DavMethod` uses the bits 0x0001 ..= 0x8000, so the table must
+        // cover all of 0xffff.
+        assert_eq!(bits, 0xffff);
+    }
+
+    /// Routes are filtered by method, but a path that matched is reported as
+    /// "known" even when no route allows the request method.
+    #[test]
+    fn test_method_filtering() -> Result<(), Box<dyn std::error::Error>> {
+        let rtr = Router::<usize>::builder()
+            .add("/files/*path", Some(DavMethodSet::WEBDAV_RO), 0)?
+            .add("/files/*path", Some(DavMethodSet::HTTP_RW), 1)?
+            .build();
+
+        // A method that both locations allow matches both, in route order.
+        let m = rtr.matches(b"/files/x", DavMethod::Get, &[]);
+        assert_eq!(m.routes.iter().map(|r| *r.data).collect::<Vec<_>>(), [0, 1]);
+
+        // A method that only the second location allows routes to that one.
+        let m = rtr.matches(b"/files/x", DavMethod::Put, &[]);
+        assert_eq!(m.routes.iter().map(|r| *r.data).collect::<Vec<_>>(), [1]);
+
+        // A method that no location allows matches no route, but the path is
+        // known: the allowed methods are the union over all matching routes.
+        let m = rtr.matches(b"/files/x", DavMethod::Delete, &[]);
+        assert!(m.routes.is_empty());
+        assert_eq!(
+            methods(m.allowed.unwrap()).collect::<Vec<_>>(),
+            ["HEAD", "GET", "PUT", "OPTIONS", "PROPFIND"]
+        );
+
+        // A path that matches no location at all is not known.
+        let m = rtr.matches(b"/other/x", DavMethod::Get, &[]);
+        assert!(m.routes.is_empty());
+        assert!(m.allowed.is_none());
+
         Ok(())
     }
 }
