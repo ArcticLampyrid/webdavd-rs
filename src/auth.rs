@@ -11,26 +11,25 @@ use crate::HttpRequest;
 
 #[derive(Clone)]
 pub struct Auth {
-    config:   Arc<Config>,
+    config:    Arc<Config>,
     #[cfg(feature = "pam")]
-    pam_auth: pam_sandboxed::PamAuth,
+    pam_auth:  pam_sandboxed::PamAuth,
+    /// `None` when the cache is disabled.
+    #[cfg(feature = "pam")]
+    pam_cache: Option<moka::sync::Cache<u64, String>>,
 }
 
 impl Auth {
     pub fn new(config: Arc<Config>) -> io::Result<Auth> {
         // initialize pam.
         #[cfg(feature = "pam")]
-        let pam_auth = {
-            // set cache timeouts.
-            if let Some(timeout) = config.pam.cache_timeout {
-                crate::cache::cached::set_pamcache_timeout(timeout);
-            }
-            pam_sandboxed::PamAuth::new(config.pam.threads)?
-        };
+        let pam_auth = pam_sandboxed::PamAuth::new(config.pam.threads)?;
 
         Ok(Auth {
             #[cfg(feature = "pam")]
             pam_auth,
+            #[cfg(feature = "pam")]
+            pam_cache: crate::cache::new_optional_cache(config.pam.cache_timeout),
             config,
         })
     }
@@ -96,11 +95,24 @@ impl Auth {
         };
         let ip_ref = ip_string.as_deref();
 
-        // authenticate.
+        // A cache hit skips the PAM conversation.
         let service = self.config.pam.service.as_str();
-        let pam_auth = self.pam_auth.clone();
-        match crate::cache::cached::pam_auth(pam_auth, service, user, pass, ip_ref).await {
-            Ok(_) => Ok(user.to_string()),
+        let key = pam_cache_key(service, user, pass, ip_ref);
+        if let Some(cached) = self.pam_cache.as_ref().and_then(|cache| cache.get(&key)) {
+            if cached == user {
+                return Ok(user.to_string());
+            }
+        }
+
+        // authenticate.
+        let mut pam_auth = self.pam_auth.clone();
+        match pam_auth.auth(service, user, pass, ip_ref).await {
+            Ok(_) => {
+                if let Some(cache) = &self.pam_cache {
+                    cache.insert(key, user.to_owned());
+                }
+                Ok(user.to_string())
+            },
             Err(_) => {
                 debug!(
                     "auth_pam({}): authentication for {} ({:?}) failed",
@@ -153,4 +165,19 @@ impl Auth {
             Err(StatusCode::UNAUTHORIZED)
         })
     }
+}
+
+// Key for the PAM cache. The user name is stored as the value to detect
+// hash collisions.
+#[cfg(feature = "pam")]
+fn pam_cache_key(service: &str, user: &str, pass: &str, remip: Option<&str>) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut s = DefaultHasher::new();
+    service.hash(&mut s);
+    user.hash(&mut s);
+    pass.hash(&mut s);
+    remip.hash(&mut s);
+    s.finish()
 }

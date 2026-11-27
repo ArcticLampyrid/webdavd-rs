@@ -54,6 +54,7 @@ hyper-util = { version = "0.1.21", features = [ "tokio", "server", "server-auto"
 lazy_static = "1.5.1"
 libc = "0.2.191"
 log = "0.4.35"
+moka = { version = "0.12.16", default-features = false, features = [ "sync" ] }
 onc-rpc = { version = "0.3.3", default-features = false, optional = true }
 pam-sandboxed = { path = "pam", version = "0.2.0", optional = true }
 pwhash = "1.0.0"

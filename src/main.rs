@@ -63,9 +63,11 @@ const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 // Contains "state" and a handle to the config.
 #[derive(Clone)]
 struct Server {
-    dh:     DavHandler,
-    auth:   auth::Auth,
-    config: Arc<config::Config>,
+    dh:       DavHandler,
+    auth:     auth::Auth,
+    config:   Arc<config::Config>,
+    /// `None` when the cache is disabled.
+    pw_cache: Option<moka::sync::Cache<String, Arc<unixuser::User>>>,
 }
 
 type HttpResult = Result<http::Response<dav_server::body::Body>, io::Error>;
@@ -83,7 +85,14 @@ impl Server {
         let ls = FakeLs::new() as Box<dyn DavLockSystem>;
         let dh = DavHandler::builder().locksystem(ls).build_handler();
 
-        Server { dh, auth, config }
+        let pw_cache = cache::new_optional_cache(config.unix.cache_timeout);
+
+        Server {
+            dh,
+            auth,
+            config,
+            pw_cache,
+        }
     }
 
     // check user account.
@@ -112,7 +121,7 @@ impl Server {
         };
 
         // check if user exists.
-        let pwd = match cache::cached::unixuser(user, self.config.unix.aux_groups).await {
+        let pwd = match self.user_by_name(user).await {
             Ok(pwd) => pwd,
             Err(_) => {
                 debug!("acct: unix: user {} not found", user);
@@ -128,6 +137,18 @@ impl Server {
             }
         }
         Ok(Some(pwd))
+    }
+
+    // Look up a Unix account, using the cache if enabled.
+    async fn user_by_name(&self, name: &str) -> io::Result<Arc<unixuser::User>> {
+        if let Some(user) = self.pw_cache.as_ref().and_then(|cache| cache.get(name)) {
+            return Ok(user);
+        }
+        let user = Arc::new(unixuser::User::by_name_async(name, self.config.unix.aux_groups).await?);
+        if let Some(cache) = &self.pw_cache {
+            cache.insert(name.to_owned(), user.clone());
+        }
+        Ok(user)
     }
 
     // return a new response::Builder with the Server and CORS header set.
@@ -459,11 +480,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.server.listen = config::OneOrManyAddr::Many(localhosts);
     }
     let config = Arc::new(config);
-
-    // set cache timeouts.
-    if let Some(timeout) = config.unix.cache_timeout {
-        cache::cached::set_pwcache_timeout(timeout);
-    }
 
     // resolve addresses.
     let addrs = config.server.listen.clone().to_socket_addrs().unwrap_or_else(|e| {

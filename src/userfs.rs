@@ -54,19 +54,19 @@ impl UserFs {
     #[cfg(feature = "quota")]
     pub fn get_quota_for_path(&self, path: &Path) -> FsFuture<'_, (u64, Option<u64>)> {
         use std::os::unix::fs::MetadataExt;
+        use std::sync::LazyLock;
         use std::time::Duration;
 
         use dav_server::fs::FsError;
         use futures::future::FutureExt;
+        use moka::sync::Cache;
 
-        use crate::cache::Cache;
+        use crate::cache::new_cache;
         use crate::quota::{self, QuotaInfo};
 
-        lazy_static::lazy_static! {
-            // Keyed by (st_dev, uid): all paths on one filesystem share one entry.
-            static ref QCACHE: Cache<(u64, Option<u32>), QuotaInfo> =
-                Cache::new().maxage(Duration::from_secs(30));
-        }
+        // Keyed by (st_dev, uid): all paths on one filesystem share one entry.
+        static QCACHE: LazyLock<Cache<(u64, Option<u32>), QuotaInfo>> =
+            LazyLock::new(|| new_cache(Duration::from_secs(30)));
 
         let path = path.to_path_buf();
         let uid = self.uid;
@@ -78,7 +78,7 @@ impl UserFs {
                     let key = std::fs::metadata(&path).ok().map(|meta| (meta.dev(), uid));
                     if let Some(info) = key.and_then(|key| QCACHE.get(&key)) {
                         debug!("get_quota for {:?}: from cache", path);
-                        return Ok(*info);
+                        return Ok(info);
                     }
                     let info = quota::check_path(&path, uid).map_err(|err| {
                         error!("get_quota for {:?}: {}", path, err);
