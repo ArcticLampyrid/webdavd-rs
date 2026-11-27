@@ -42,7 +42,8 @@ quota-nfs = [ "quota", "dep:onc-rpc" ]
 [dependencies]
 bytes = "1.12"
 clap = { version = "4.6.9", features = [ "cargo" ] }
-dav-server = { version = "0.12.0", default-features = false, features = [ "localfs", "proppatch" ] }
+# Use latest features that not yet released on crates.io.
+dav-server = { git = "https://github.com/messense/dav-server-rs", rev = "3ae94e06a72fb153c8a581ac40b2205591544f35", default-features = false, features = [ "localfs", "proppatch" ] }
 env_logger = "0.11.12"
 futures = "0.3.34"
 headers = "0.4.2"
