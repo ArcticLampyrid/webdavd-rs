@@ -1,0 +1,24 @@
+[server]
+listen = "127.0.0.1:8080"
+# nobody
+uid = 65534
+gid = 65534
+
+[accounts]
+auth-type = "pam"
+acct-type = "unix"
+
+[pam]
+service = "webdavd"
+cache-timeout = 0
+
+[unix]
+min-uid = 2000
+
+[[location]]
+route = [ "/private(/*path)" ]
+methods = [ "webdav-ro" ]
+auth = "true"
+handler = "filesystem"
+setuid = false
+directory = "/srv/webdav/private"
