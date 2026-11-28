@@ -3,6 +3,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use crate::config::{AuthType, Config, Location};
+#[cfg(feature = "pam")]
+use crate::pam::{BrokerOptions, PamAuth, PamError};
 
 use headers::{authorization::Basic, Authorization, HeaderMapExt};
 use http::status::StatusCode;
@@ -12,18 +14,35 @@ use crate::HttpRequest;
 #[derive(Clone)]
 pub struct Auth {
     config:    Arc<Config>,
+    /// `None` when no location uses PAM.
     #[cfg(feature = "pam")]
-    pam_auth:  pam_sandboxed::PamAuth,
-    /// `None` when the cache is disabled.
+    pam_auth:  Option<PamAuth>,
+    /// `(submitted user, user after PAM)`, by [`pam_cache_key`]. `None`
+    /// when the cache is disabled.
     #[cfg(feature = "pam")]
-    pam_cache: Option<moka::sync::Cache<u64, String>>,
+    pam_cache: Option<moka::sync::Cache<u64, (String, String)>>,
 }
 
 impl Auth {
-    pub fn new(config: Arc<Config>) -> io::Result<Auth> {
-        // initialize pam.
+    /// Starts the PAM broker if a location uses PAM. Call this before the
+    /// server drops its privileges, so that the broker keeps them.
+    ///
+    /// The PAM processes use `pam_log_filter` as `RUST_LOG` if it is set.
+    ///
+    /// # Panics
+    /// If the PAM broker does not start.
+    pub async fn new(
+        config: Arc<Config>,
+        #[cfg_attr(not(feature = "pam"), allow(unused_variables))] pam_log_filter: Option<&str>,
+    ) -> io::Result<Auth> {
         #[cfg(feature = "pam")]
-        let pam_auth = pam_sandboxed::PamAuth::new(config.pam.threads)?;
+        let pam_auth = if config.uses_pam() {
+            let services = [config.pam.service.as_str()];
+            let opts = BrokerOptions::new(config.pam.workers(), pam_log_filter, services)?;
+            Some(PamAuth::new(opts).await)
+        } else {
+            None
+        };
 
         Ok(Auth {
             #[cfg(feature = "pam")]
@@ -40,8 +59,7 @@ impl Auth {
         req: &'a HttpRequest,
         location: &Location,
         _remote_ip: SocketAddr,
-    ) -> Result<String, StatusCode>
-    {
+    ) -> Result<String, StatusCode> {
         // we must have a login/pass
         let basic = match req.headers().typed_get::<Authorization<Basic>>() {
             Some(Authorization(basic)) => basic,
@@ -51,12 +69,7 @@ impl Auth {
         let pass = basic.password();
 
         // match the auth type.
-        let auth_type = location
-            .accounts
-            .auth_type
-            .as_ref()
-            .or(self.config.accounts.auth_type.as_ref());
-        match auth_type {
+        match self.config.auth_type(location) {
             #[cfg(feature = "pam")]
             Some(&AuthType::Pam) => self.auth_pam(req, user, pass, _remote_ip).await,
             Some(AuthType::HtPasswd(ht)) => self.auth_htpasswd(user, pass, ht.as_str()).await,
@@ -75,8 +88,7 @@ impl Auth {
         user: &'a str,
         pass: &'a str,
         remote_ip: SocketAddr,
-    ) -> Result<String, StatusCode>
-    {
+    ) -> Result<String, StatusCode> {
         // stringify the remote IP address.
         let ip = remote_ip.ip();
         let ip_string = if ip.is_loopback() {
@@ -98,27 +110,43 @@ impl Auth {
         // A cache hit skips the PAM conversation.
         let service = self.config.pam.service.as_str();
         let key = pam_cache_key(service, user, pass, ip_ref);
-        if let Some(cached) = self.pam_cache.as_ref().and_then(|cache| cache.get(&key)) {
-            if cached == user {
-                return Ok(user.to_string());
-            }
+        let cached = self.pam_cache.as_ref().and_then(|cache| cache.get(&key));
+        if let Some((_, canonical)) = cached.filter(|(submitted, _)| submitted == user) {
+            return Ok(canonical);
         }
 
         // authenticate.
-        let mut pam_auth = self.pam_auth.clone();
+        let Some(pam_auth) = &self.pam_auth else {
+            return Err(StatusCode::UNAUTHORIZED);
+        };
         match pam_auth.auth(service, user, pass, ip_ref).await {
-            Ok(_) => {
-                if let Some(cache) = &self.pam_cache {
-                    cache.insert(key, user.to_owned());
+            // A PAM module can map the user to another name (PAM_USER). The
+            // server uses that name for routes, accounts and setuid.
+            Ok(canonical) => {
+                if canonical != user {
+                    debug!(
+                        "auth_pam({}): PAM mapped user {:?} to {:?}",
+                        service, user, canonical
+                    );
                 }
-                Ok(user.to_string())
+                if let Some(cache) = &self.pam_cache {
+                    cache.insert(key, (user.to_owned(), canonical.clone()));
+                }
+                Ok(canonical)
             },
-            Err(_) => {
+            Err(PamError::Rejected(e)) => {
                 debug!(
-                    "auth_pam({}): authentication for {} ({:?}) failed",
-                    service, user, ip_ref
+                    "auth_pam({}): authentication for {:?} ({:?}) failed: {}",
+                    service, user, ip_ref, e
                 );
                 Err(StatusCode::UNAUTHORIZED)
+            },
+            Err(PamError::Unavailable(e)) => {
+                warn!(
+                    "auth_pam({}): authentication for {:?} ({:?}) unavailable: {}",
+                    service, user, ip_ref, e
+                );
+                Err(StatusCode::SERVICE_UNAVAILABLE)
             },
         }
     }
@@ -129,8 +157,7 @@ impl Auth {
         user: &'a str,
         pass: &'a str,
         section: &'a str,
-    ) -> Result<String, StatusCode>
-    {
+    ) -> Result<String, StatusCode> {
         // Get the htpasswd.WHATEVER section from the config file.
         let file = match self.config.htpasswd.get(section) {
             Some(section) => section.htpasswd.as_str(),
@@ -167,8 +194,8 @@ impl Auth {
     }
 }
 
-// Key for the PAM cache. The user name is stored as the value to detect
-// hash collisions.
+// Key for the PAM cache. The submitted user name is stored in the value to
+// detect hash collisions.
 #[cfg(feature = "pam")]
 fn pam_cache_key(service: &str, user: &str, pass: &str, remip: Option<&str>) -> u64 {
     use std::collections::hash_map::DefaultHasher;
