@@ -32,16 +32,11 @@ jobs:
             binary: target/release/webdavd
             binary_arg: LINUX_WEBDAVD_PATH
             case_filter: linux-
-            build: cargo build --release --locked
           - profile: freebsd-14
             guest: freebsd
-            binary: target/x86_64-unknown-freebsd/release/webdavd
+            binary: freebsd-webdavd
             binary_arg: FREEBSD_WEBDAVD_PATH
             case_filter: freebsd-
-            # The FreeBSD guest does not use PAM, and NFS quota is Linux-only.
-            build: >-
-              cross build --release --locked --target x86_64-unknown-freebsd
-              --no-default-features --features quota
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -59,11 +54,18 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libpam0g-dev
 
-      - name: Install cross
+      - name: Build webdavd on FreeBSD
         if: matrix.guest == 'freebsd'
-        uses: taiki-e/install-action@v2
+        uses: vmactions/freebsd-vm@v1
         with:
-          tool: cross
+          release: "14.5"
+          prepare: pkg install -y rust git
+          run: |
+            set -eu
+            # Only copy the final binary back to the runner.
+            export CARGO_TARGET_DIR="$(mktemp -d)"
+            cargo build --release --locked --no-default-features --features pam,quota
+            cp "$CARGO_TARGET_DIR/release/webdavd" "${{ matrix.binary }}"
 
       - name: Set up Rust cache
         uses: Swatinem/rust-cache@v2
@@ -73,8 +75,9 @@ jobs:
             . -> target
             e2e-harness -> target
 
-      - name: Build webdavd
-        run: ${{ matrix.build }}
+      - name: Build webdavd for Debian
+        if: matrix.guest == 'debian'
+        run: cargo build --release --locked
 
       - name: Stage webdavd for the guest
         run: |
