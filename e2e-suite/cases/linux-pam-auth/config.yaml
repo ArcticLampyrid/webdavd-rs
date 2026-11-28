@@ -1,7 +1,6 @@
-# PAM authentication: the accounts alice and bob get access, while a wrong
-# password, an unknown account, and an anonymous request get 401 Unauthorized.
-# The accounts must agree with assets/test.py.
+# PAM authentication, minimum UID, and filesystem access as the logged-in user.
 vm-profile: debian-13
+disks: [128M]
 
 # LINUX_WEBDAVD_PATH: path of the webdavd binary in the workspace. It must run
 # with the glibc of Debian 13.
@@ -12,11 +11,31 @@ steps:
     type: script
     run: |
       set -eux
-      useradd --create-home --shell /bin/sh alice
-      useradd --create-home --shell /bin/sh bob
-      printf '%s\n' alice:alice-e2e-pw bob:bob-e2e-pw | chpasswd
+      groupadd writers
+      # alice is exactly at the configured min-uid; lowuid is just below it.
+      useradd -U -u 2000 -G writers alice
+      useradd -U -u 2001 bob
+      useradd -U -u 2002 carol
+      useradd -U -u 1999 lowuid
+      for user in alice bob carol lowuid; do
+          printf '%s:%s-e2e-pw\n' "$user" "$user"
+      done | chpasswd
       printf '%s\n' 'auth    required pam_unix.so' 'account required pam_unix.so' >/etc/pam.d/webdavd
-      mkdir -p /srv/webdav/groups
+
+  - name: set up ext4 with a POSIX ACL
+    type: script
+    run: |
+      set -eux
+      DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends acl
+      mkfs.ext4 -q /dev/vdb
+      root=/srv/webdav/groups
+      mkdir -p "$root"
+      mount -o acl /dev/vdb "$root"
+      chmod 0755 "$root"
+      install -d -m 0700 "$root/shared"
+      setfacl -m g:writers:rwx,u:bob:r-x "$root/shared"
+      printf 'shared\n' >"$root/shared/seed.txt"
+      chmod 0644 "$root/shared/seed.txt"
 
   - name: start webdavd
     type: script
@@ -35,7 +54,7 @@ steps:
       done
       exit 1
 
-  - name: check PAM authentication
+  - name: check authentication, identity, and ACL enforcement
     type: script
     run: |
       set -eux

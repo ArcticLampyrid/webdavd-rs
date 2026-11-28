@@ -15,7 +15,7 @@ service = "webdavd"
 cache-timeout = 0
 
 [unix]
-min-uid = 1000
+min-uid = 2000
 supplementary-groups = true
 
 [[location]]
