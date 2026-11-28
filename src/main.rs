@@ -17,6 +17,8 @@ extern crate log;
 mod auth;
 mod cache;
 mod config;
+#[cfg(feature = "pam")]
+mod pam;
 #[cfg(feature = "quota")]
 mod quota;
 mod rootfs;
@@ -56,6 +58,9 @@ use crate::tls::tls_acceptor;
 use crate::userfs::UserFs;
 
 static PROGNAME: &str = "webdavd";
+
+// Log filter for `--debug`, if RUST_LOG is not set.
+const DEBUG_LOG_FILTER: &str = "webdavd=debug,dav_server=debug";
 
 // How long a client may take to complete the TLS handshake.
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -101,8 +106,7 @@ impl Server {
         location: &Location,
         auth_user: Option<&'a String>,
         user_param: Option<&'a str>,
-    ) -> Result<Option<Arc<unixuser::User>>, StatusCode>
-    {
+    ) -> Result<Option<Arc<unixuser::User>>, StatusCode> {
         // Get username - if any.
         let user = match auth_user.map(|u| u.as_str()).or(user_param) {
             Some(u) => u,
@@ -186,9 +190,7 @@ impl Server {
             }
 
             // handle request.
-            let res = self
-                .handle(req, method, path, route, location, remote_ip)
-                .await?;
+            let res = self.handle(req, method, path, route, location, remote_ip).await?;
 
             // no on_notfound? then this is final.
             if reqdata.is_none() || res.status() != StatusCode::NOT_FOUND {
@@ -221,8 +223,7 @@ impl Server {
         route: MatchedRoute<'t, 'p, usize>,
         location: &'a Location,
         remote_ip: SocketAddr,
-    ) -> HttpResult
-    {
+    ) -> HttpResult {
         // See if we matched a :user parameter
         // If so, it must be valid UTF-8, or we return NOT_FOUND.
         let user_param = match route.params[0].as_ref() {
@@ -392,7 +393,10 @@ fn set_headers(srv: &config::Server, headers: &mut http::HeaderMap<http::header:
     }
     if srv.cors {
         headers.insert("Access-Control-Allow-Origin", "*".parse().unwrap());
-        headers.insert("Access-Control-Allow-Methods", "GET,HEAD,OPTIONS,PROPFIND".parse().unwrap());
+        headers.insert(
+            "Access-Control-Allow-Methods",
+            "GET,HEAD,OPTIONS,PROPFIND".parse().unwrap(),
+        );
         headers.insert("Access-Control-Allow-Headers", "DNT,Depth,Range".parse().unwrap());
     }
 }
@@ -417,8 +421,7 @@ fn error_body(code: StatusCode) -> String {
 fn no_route_response(
     srv: &config::Server,
     allowed: Option<DavMethodSet>,
-) -> http::Response<dav_server::body::Body>
-{
+) -> http::Response<dav_server::body::Body> {
     let code = match allowed {
         Some(_) => StatusCode::METHOD_NOT_ALLOWED,
         None => StatusCode::NOT_FOUND,
@@ -435,7 +438,7 @@ fn no_route_response(
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // command line option processing.
-    let matches = Command::new(PROGNAME)
+    let cmd = Command::new(PROGNAME)
         .version(env!("CARGO_PKG_VERSION"))
         .arg(
             Arg::new("CFG")
@@ -465,16 +468,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .long("print_config")
                 .action(ArgAction::SetTrue)
                 .help("print configuration and exit"),
-        )
-        .get_matches();
+        );
+    #[cfg(feature = "pam")]
+    let cmd = pam::add_subcommands(cmd);
+    let matches = cmd.get_matches();
 
-    if matches.get_flag("DBG") {
-        use env_logger::Env;
-        let level = "webdavd=debug,dav_server=debug";
-        env_logger::Builder::from_env(Env::default().default_filter_or(level)).init();
-    } else {
-        env_logger::init();
+    // The PAM processes are single-threaded. Run them before the server reads
+    // its config or starts the runtime.
+    #[cfg(feature = "pam")]
+    pam::run_subcommand(&matches);
+
+    // RUST_LOG has priority over `--debug`. The PAM processes inherit
+    // RUST_LOG; if it is not set, they get the filter for `--debug`.
+    let debug_log_filter =
+        (matches.get_flag("DBG") && std::env::var_os("RUST_LOG").is_none()).then_some(DEBUG_LOG_FILTER);
+    let mut logger = env_logger::Builder::from_default_env();
+    if let Some(filter) = debug_log_filter {
+        logger.parse_filters(filter);
     }
+    logger.init();
 
     let port = matches.get_one::<u16>("PORT").copied();
     let cfg = matches
@@ -513,17 +525,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Arc::new(config);
 
     // resolve addresses.
-    let addrs = config.server.listen.clone().to_socket_addrs().unwrap_or_else(|e| {
-        eprintln!("{}: {}: [server] listen: {:?}", PROGNAME, cfg, e);
-        exit(1);
-    });
-    let tls_addrs = config.server.tls_listen.clone().to_socket_addrs().unwrap_or_else(|e| {
-        eprintln!("{}: {}: [server] listen: {:?}", PROGNAME, cfg, e);
-        exit(1);
-    });
-
-    // initialize auth early.
-    let auth = auth::Auth::new(config.clone())?;
+    let addrs = config
+        .server
+        .listen
+        .clone()
+        .to_socket_addrs()
+        .unwrap_or_else(|e| {
+            eprintln!("{}: {}: [server] listen: {:?}", PROGNAME, cfg, e);
+            exit(1);
+        });
+    let tls_addrs = config
+        .server
+        .tls_listen
+        .clone()
+        .to_socket_addrs()
+        .unwrap_or_else(|e| {
+            eprintln!("{}: {}: [server] listen: {:?}", PROGNAME, cfg, e);
+            exit(1);
+        });
 
     // start tokio runtime and initialize the rest from within the runtime.
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -532,6 +551,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
 
     rt.block_on(async move {
+        // Start the PAM broker while the process still has its initial privileges.
+        let auth = auth::Auth::new(config.clone(), debug_log_filter).await?;
+
         // build servers (one for each listen address).
         let dav_server = Server::new(config.clone(), auth);
         let mut servers = Vec::new();
@@ -559,7 +581,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     exit(1);
                 });
                 println!("Listening on https://{:?}", sockaddr);
-                servers.push(accept_loop(listener, dav_server.clone(), Some(tls_acceptor.clone())));
+                servers.push(accept_loop(
+                    listener,
+                    dav_server.clone(),
+                    Some(tls_acceptor.clone()),
+                ));
             }
         }
 
@@ -572,8 +598,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 exit(1);
             }
-            let keep_privs = config.location.iter().any(|l| l.setuid);
-            proc_switch_ugid(uid, gid, keep_privs);
+            proc_switch_ugid(uid, gid, config.uses_setuid());
         }
 
         // spawn all servers, and wait for them to finish.
@@ -683,7 +708,7 @@ fn expand_directory(dir: &str, pwd: Option<&Arc<unixuser::User>>) -> Result<Stri
 // Make a new TcpListener, and if it's a V6 listener, set the
 // V6_V6ONLY socket option on it.
 fn make_listener(srv: &config::Server, addr: SocketAddr) -> io::Result<TcpListener> {
-    use socket2::{Domain, SockAddr, Socket, Type, Protocol};
+    use socket2::{Domain, Protocol, SockAddr, Socket, Type};
     let s = Socket::new(Domain::for_address(addr), Type::STREAM, Some(Protocol::TCP))?;
     if let Some(cong) = srv.congestion_control.as_ref() {
         tcp_cong::set_congestion_control(&s, cong).map_err(|e| {

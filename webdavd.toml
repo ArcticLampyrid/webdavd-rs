@@ -36,10 +36,15 @@
 #
 [pam]
   # PAM service to use.
+  #
+  # webdavd calls pam_authenticate (auth) and pam_acct_mgmt (account), so
+  # /etc/pam.d/<service> must configure both the "auth" and the "account"
+  # stack. A missing stack falls back to "other", which on some systems
+  # denies all account checks.
   service = "other"
   # Cache timeout (secs). 0 disables the cache (default: 120).
   cache-timeout = 120
-  # Number of thread to use for the PAM service threadpool (default: 8).
+  # Number of PAM worker processes, 1 to 128 (default: 8).
   threads = 8
 
 #

@@ -27,24 +27,48 @@ pub struct Config {
     pub router:   Router<usize>,
 }
 
+impl Config {
+    /// The auth type of `location`. Falls back to the global `[accounts]` setting.
+    pub fn auth_type<'a>(&'a self, location: &'a Location) -> Option<&'a AuthType> {
+        location
+            .accounts
+            .auth_type
+            .as_ref()
+            .or(self.accounts.auth_type.as_ref())
+    }
+
+    /// Does any location authenticate with PAM?
+    #[cfg(feature = "pam")]
+    pub fn uses_pam(&self) -> bool {
+        self.location
+            .iter()
+            .any(|location| matches!(self.auth_type(location), Some(AuthType::Pam)))
+    }
+
+    /// Does any location switch to the uid/gid of the user?
+    pub fn uses_setuid(&self) -> bool {
+        self.location.iter().any(|location| location.setuid)
+    }
+}
+
 #[derive(Deserialize, Debug, Clone)]
 pub struct Server {
     #[serde(default)]
-    pub listen:         OneOrManyAddr,
+    pub listen:             OneOrManyAddr,
     #[serde(default)]
-    pub tls_listen:     OneOrManyAddr,
+    pub tls_listen:         OneOrManyAddr,
     #[serde(default)]
-    pub tls_key:        Option<String>,
+    pub tls_key:            Option<String>,
     #[serde(default)]
-    pub tls_cert:       Option<String>,
+    pub tls_cert:           Option<String>,
     //#[serde(deserialize_with = "deserialize_user", default)]
-    pub uid:            Option<u32>,
+    pub uid:                Option<u32>,
     //#[serde(deserialize_with = "deserialize_group", default)]
-    pub gid:            Option<u32>,
+    pub gid:                Option<u32>,
     #[serde(default)]
-    pub identification: Option<String>,
+    pub identification:     Option<String>,
     #[serde(default)]
-    pub cors:             bool,
+    pub cors:               bool,
     #[serde(default)]
     pub congestion_control: Option<String>,
 }
@@ -66,7 +90,17 @@ pub struct Pam {
     pub service:       String,
     #[serde(rename = "cache-timeout")]
     pub cache_timeout: Option<usize>,
+    /// Number of PAM worker processes.
+    #[serde(alias = "workers")]
     pub threads:       Option<usize>,
+}
+
+#[cfg(feature = "pam")]
+impl Pam {
+    /// Number of PAM worker processes, with the default applied.
+    pub fn workers(&self) -> usize {
+        self.threads.unwrap_or(8)
+    }
 }
 
 #[derive(Deserialize, Debug, Clone, Default)]
@@ -90,7 +124,7 @@ pub struct Location {
     pub route:            Vec<String>,
     #[serde(deserialize_with = "deserialize_methodset", default)]
     pub methods:          Option<DavMethodSet>,
-    #[serde( default)]
+    #[serde(default)]
     pub auth:             Option<Auth>,
     #[serde(default, flatten)]
     pub accounts:         Accounts,
@@ -194,18 +228,14 @@ impl ToSocketAddrs for OneOrManyAddr {
 pub fn deserialize_user<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
 where D: Deserializer<'de> {
     let s = String::deserialize(deserializer)?;
-    s.parse::<u32>()
-        .map(Some)
-        .map_err(serde::de::Error::custom)
+    s.parse::<u32>().map(Some).map_err(serde::de::Error::custom)
 }
 
 #[allow(unused)]
 pub fn deserialize_group<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
 where D: Deserializer<'de> {
     let s = String::deserialize(deserializer)?;
-    s.parse::<u32>()
-        .map(Some)
-        .map_err(serde::de::Error::custom)
+    s.parse::<u32>().map(Some).map_err(serde::de::Error::custom)
 }
 
 pub fn deserialize_methodset<'de, D>(deserializer: D) -> Result<Option<DavMethodSet>, D::Error>
@@ -261,15 +291,21 @@ pub fn build_routes(cfg: &str, config: &mut Config) -> io::Result<()> {
 
 pub fn check(cfg: &str, config: &Config) {
     #[cfg(feature = "pam")]
-    if let Some(AuthType::Pam) = config.accounts.auth_type {
-        if config.pam.service.is_empty() {
-            eprintln!("{}: missing section [pam]", cfg);
-            exit(1);
-        }
+    if config.uses_pam() && config.pam.service.is_empty() {
+        eprintln!("{}: missing section [pam]", cfg);
+        exit(1);
+    }
+    #[cfg(feature = "pam")]
+    if !(1..=crate::pam::MAX_WORKERS).contains(&config.pam.workers()) {
+        eprintln!("{}: [pam] threads: must be 1 to {}", cfg, crate::pam::MAX_WORKERS);
+        exit(1);
     }
 
     if config.server.listen.is_empty() && config.server.tls_listen.is_empty() {
-        eprintln!("{}: [server]: at least one of listen or tls_listen must be set", cfg);
+        eprintln!(
+            "{}: [server]: at least one of listen or tls_listen must be set",
+            cfg
+        );
         exit(1);
     }
     if !config.server.tls_listen.is_empty() {
